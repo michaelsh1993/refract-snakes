@@ -27,7 +27,11 @@ function browserStorage() {
   try { return globalThis.sessionStorage ?? null; } catch { return null; }
 }
 
-export function createSession({ send, onChange, storage = browserStorage(), rollDie = fairDie, theme: preferredTheme = 'classic' }) {
+// The host takes at most one theme change per second, so rapid switching cannot flood the
+// relay (Refract allows about 20 messages a second) and drown out the rolls.
+export const THEME_COOLDOWN_MS = 1000;
+
+export function createSession({ send, onChange, storage = browserStorage(), rollDie = fairDie, theme: preferredTheme = 'classic', now = () => Date.now() }) {
   // A new game starts on this viewer's preferred board; the host's copy wins once connected.
   let state = createGame([], preferredTheme);
   let self = null;
@@ -40,6 +44,7 @@ export function createSession({ send, onChange, storage = browserStorage(), roll
   let destroyed = false;
   let acceptedHostId = null;
   let pendingSync = null;
+  let lastThemeAt = -Infinity;
 
   const ids = () => participants.map((person) => person.id);
   const isHost = () => self !== null && self.id === hostId;
@@ -192,8 +197,11 @@ export function createSession({ send, onChange, storage = browserStorage(), roll
   }
 
   function applyAction(from, data) {
-    if (!seated(from) || !enoughPlayers() || data.round !== state.round || data.revision !== state.revision) return false;
+    // Theme and seat updates move the revision, so they must not void a roll request in flight.
+    // The roll count still stops a duplicate or stale request from rolling twice.
+    if (!seated(from) || !enoughPlayers() || data.round !== state.round) return false;
     if (data.kind === 'roll') {
+      if (data.rolls !== state.rolls) return false;
       // Only the coordinator throws the die, so a guest cannot choose its own roll.
       if (state.winner !== null || state.players[state.turn] !== from) return false;
       const next = playRoll(state, from, rollDie());
@@ -209,6 +217,8 @@ export function createSession({ send, onChange, storage = browserStorage(), roll
   }
 
   function applyTheme(theme) {
+    if (now() - lastThemeAt < THEME_COOLDOWN_MS) return;
+    lastThemeAt = now();
     state = { ...state, theme, revision: state.revision + 1 };
     emit();
     snapshot();
@@ -242,8 +252,8 @@ export function createSession({ send, onChange, storage = browserStorage(), roll
     }
     if (isHost() && data.kind === 'theme') {
       // Cosmetic, so anyone in the activity may change it, spectators included.
+      // Ignored requests need no reply: the picker always shows the game's current theme.
       if (typeof data.theme === 'string' && BOARD_THEMES.includes(data.theme) && data.theme !== state.theme) applyTheme(data.theme);
-      else snapshot([from]);
       return;
     }
     if (isHost() && (data.kind === 'roll' || data.kind === 'rematch')) {
@@ -265,7 +275,7 @@ export function createSession({ send, onChange, storage = browserStorage(), roll
     }
     if (kind === 'roll' && (state.winner !== null || state.players[state.turn] !== self.id)) return;
     if (kind === 'rematch' && state.winner === null) return;
-    const data = { kind, round: state.round, revision: state.revision };
+    const data = { kind, round: state.round, ...(kind === 'roll' ? { rolls: state.rolls } : {}) };
     if (isHost()) applyAction(self.id, data);
     else transmit(kind, data, [hostId]);
   }

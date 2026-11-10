@@ -49,6 +49,9 @@ export function createGame(players = [1, 2], theme = 'classic') {
     lastRoll: null,
     round: 1,
     scores: [0, 0, 0, 0],
+    // Every roll ever thrown in this game. A roll is identified by this count, not by
+    // the revision, which also moves for theme and seat changes.
+    rolls: 0,
     revision: 0,
   };
 }
@@ -82,6 +85,7 @@ export function playRoll(state, playerId, die) {
     // A six earns another roll.
     turn: won || die === 6 ? seat : nextSeat(state.players, seat),
     lastRoll: { seat, die, from, ...move },
+    rolls: state.rolls + 1,
     revision: state.revision + 1,
   };
 }
@@ -123,6 +127,7 @@ export function isValidGame(state, memberIds) {
   if (!state || typeof state !== 'object') return false;
   const { positions, players, scores, turn, winner, lastRoll, round, revision } = state;
   if (!BOARD_THEMES.includes(state.theme)) return false;
+  if (!Number.isSafeInteger(state.rolls) || state.rolls < 0 || state.rolls > revision || (lastRoll !== null && state.rolls < 1)) return false;
   if (!Number.isSafeInteger(round) || round < 1 || !Number.isSafeInteger(revision) || revision < 0 || !isSeat(turn)) return false;
   for (const list of [positions, players, scores]) {
     if (!Array.isArray(list) || list.length !== MAX_PLAYERS) return false;

@@ -46,6 +46,7 @@ test('rolls move the token, pass the turn, and sixes roll again', () => {
   assert.deepEqual(state.positions, [3, 8, 0, 0]);
   assert.equal(state.turn, 0);
   assert.equal(state.revision, 3);
+  assert.equal(state.rolls, 3);
 });
 
 test('ladders lift, snakes drop, and the last square needs an exact roll', () => {
@@ -124,6 +125,10 @@ test('validation rejects malformed and inconsistent states', () => {
   for (const bad of [
     null, 'state', {},
     { ...state, theme: 'lava' },
+    { ...state, rolls: -1 },
+    { ...state, rolls: 0 },
+    { ...state, rolls: 99 },
+    { ...state, rolls: '2' },
     { ...state, theme: undefined },
     { ...state, positions: [3, 5, 0] },
     { ...state, positions: [3, 101, 0, 0] },

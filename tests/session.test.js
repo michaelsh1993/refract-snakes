@@ -18,12 +18,15 @@ function network(initialIds = [1, 2], { persistence = true, dice = [] } = {}) {
   let memberIds = [...initialIds];
   let sessionId = 'test-session';
   let seed = 11;
+  // A fake clock, so the theme cooldown can be passed or hit on purpose.
+  let clock = 0;
 
   function add(id) {
     if (!stores.has(id)) stores.set(id, memoryStorage());
     const client = { view: null, rolled: 0 };
     client.session = createSession({
       storage: persistence ? stores.get(id) : null,
+      now: () => clock,
       rollDie() {
         client.rolled += 1;
         if (dice.length) return dice.shift();
@@ -65,7 +68,11 @@ function network(initialIds = [1, 2], { persistence = true, dice = [] } = {}) {
     view: (id) => clients.get(id).view,
     state: () => clients.get(memberIds[0]).view.state,
     roll(id) { clients.get(id).session.roll(); flush(); },
-    theme(id, theme) { clients.get(id).session.setTheme(theme); flush(); },
+    theme(id, theme, { wait = true } = {}) {
+      if (wait) clock += 1500;
+      clients.get(id).session.setTheme(theme);
+      flush();
+    },
     rematch(id) { clients.get(id).session.rematch(); flush(); },
     // Whoever holds the turn keeps rolling until somebody reaches the last square.
     playToWin() {
@@ -102,7 +109,7 @@ function network(initialIds = [1, 2], { persistence = true, dice = [] } = {}) {
     },
     packet(kind, extra = {}) {
       const state = net.state();
-      return { protocol: GAME_PROTOCOL, sessionId, hostId: memberIds[0], kind, round: state.round, revision: state.revision, ...extra };
+      return { protocol: GAME_PROTOCOL, sessionId, hostId: memberIds[0], kind, round: state.round, rolls: state.rolls, ...extra };
     },
     assertConverged() {
       const host = clients.get(memberIds[0]).view;
@@ -137,7 +144,8 @@ test('host rejects wrong-turn, spectator, stale, spoofed and chosen-die proposal
     [2, net.packet('roll')],
     [5, net.packet('roll', { playerId: 1 })],
     [99, net.packet('roll')],
-    [1, net.packet('roll', { revision: -1 })],
+    [1, net.packet('roll', { rolls: -1 })],
+    [1, net.packet('roll', { rolls: 1 })],
     [1, net.packet('roll', { round: 2 })],
     [1, net.packet('roll', { sessionId: 'old' })],
     [1, net.packet('roll', { protocol: 'other-app/1' })],
@@ -317,6 +325,30 @@ test('anyone in the activity can change the shared board theme, and it outlasts 
   net.playToWin();
   net.rematch(1);
   assert.equal(net.state().theme, 'christmas');
+  net.assertConverged();
+});
+
+test('theme spam is rate limited and never voids, replays, or skips a roll', () => {
+  const net = network([1, 2, 3], { dice: [3, 2] });
+  net.roll(1);
+  assert.equal(net.state().turn, 1);
+  // Sam asks to roll; before the host sees it, the board theme changes.
+  const request = { from: 2, packet: net.packet('roll') };
+  net.theme(3, 'space');
+  const sentBefore = net.sent.length;
+  for (let i = 0; i < 20; i += 1) net.theme(i % 2 ? 2 : 3, i % 2 ? 'jungle' : 'christmas', { wait: false });
+  // Only Sam's and Taylor's requests went out; the host broadcast nothing for them.
+  assert.ok(net.sent.slice(sentBefore).every((message) => message.from !== 1));
+  assert.equal(net.state().theme, 'space');
+  net.clients.get(1).session.receive(request.from, request.packet);
+  net.flush();
+  assert.deepEqual(net.state().positions, [3, 2, 0, 0]);
+  assert.equal(net.state().rolls, 2);
+  assert.equal(net.state().turn, 2);
+  // Replaying the same request cannot roll Sam twice.
+  net.clients.get(1).session.receive(request.from, request.packet);
+  net.flush();
+  assert.equal(net.state().rolls, 2);
   net.assertConverged();
 });
 

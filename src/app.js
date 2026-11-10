@@ -1,5 +1,5 @@
 import { BOARD_THEMES, LADDERS, LAST_SQUARE, SEATS, SNAKES, boardTheme, createGame, nextRound, playRoll, rollDie } from './game.js';
-import { createSession } from './session.js';
+import { THEME_COOLDOWN_MS, createSession } from './session.js';
 import { connectActivity } from './bridge.js';
 
 const $ = (id) => document.getElementById(id);
@@ -215,12 +215,15 @@ function buildBoard() {
 // The board theme belongs to the game, so everyone in a shared game sees the same board.
 const themeButtons = [...document.querySelectorAll('[data-board-theme]')];
 
+// The picker rests for a moment after each change, matching the host's limit.
+let themeRestUntil = 0;
 function showBoardTheme(theme, ready) {
   const chosen = boardTheme(theme);
   document.documentElement.dataset.board = chosen;
+  const resting = Date.now() < themeRestUntil;
   for (const button of themeButtons) {
     button.setAttribute('aria-pressed', String(button.dataset.boardTheme === chosen));
-    button.disabled = !ready;
+    button.disabled = !ready || resting;
   }
 }
 
@@ -229,6 +232,8 @@ for (const button of themeButtons) {
     const theme = button.dataset.boardTheme;
     if (!BOARD_THEMES.includes(theme)) return;
     saveBoardTheme(theme);
+    themeRestUntil = Date.now() + THEME_COOLDOWN_MS;
+    setTimeout(render, THEME_COOLDOWN_MS + 20);
     if (embedded) session.setTheme(theme);
     else {
       localState = { ...localState, theme };
@@ -507,7 +512,8 @@ function placeTokens() {
 }
 
 function syncTokens(state, sessionKey) {
-  const key = `${sessionKey}:${state.round}:${state.revision}`;
+  // A theme or seat update must neither replay nor cut short a token's move.
+  const key = `${sessionKey}:${state.round}:${state.rolls}:${state.positions.join()}`;
   if (key === tokenKey && stepTimer !== null) return;
   clearTimeout(stepTimer);
   stepTimer = null;
@@ -596,7 +602,8 @@ function render() {
 
   const die = $('die');
   const value = state.lastRoll?.die ?? 0;
-  const rollKey = `${state.round}:${state.revision}`;
+  // Only a new roll throws the die; theme and seat updates leave it alone.
+  const rollKey = `${state.round}:${state.rolls}`;
   if (state.lastRoll && die.dataset.rollKey !== rollKey && die.dataset.rollKey !== undefined) {
     die.classList.remove('rolled');
     void die.offsetWidth;
