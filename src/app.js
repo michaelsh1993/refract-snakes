@@ -134,16 +134,23 @@ function drawLadder(from, to) {
   const uy = (b.y - a.y) / length;
   const px = -uy * 1.3;
   const py = ux * 1.3;
+  // The rails run a little past each square's centre, like a real ladder resting on the board.
+  const start = { x: a.x - ux * 0.9, y: a.y - uy * 0.9 };
+  const end = { x: b.x + ux * 0.9, y: b.y + uy * 0.9 };
   const group = shape('g', { class: 'ladder' });
-  for (const side of [-1, 1]) {
-    group.append(shape('line', { x1: fixed(a.x + px * side), y1: fixed(a.y + py * side), x2: fixed(b.x + px * side), y2: fixed(b.y + py * side) }));
+  const rungs = [];
+  const count = Math.max(3, Math.round(length / 3.3));
+  for (let rung = 1; rung < count; rung += 1) {
+    const x = a.x + ux * length * rung / count;
+    const y = a.y + uy * length * rung / count;
+    rungs.push({ x1: fixed(x - px), y1: fixed(y - py), x2: fixed(x + px), y2: fixed(y + py) });
   }
-  const rungs = Math.max(3, Math.round(length / 3.3));
-  for (let rung = 1; rung < rungs; rung += 1) {
-    const x = a.x + ux * length * rung / rungs;
-    const y = a.y + uy * length * rung / rungs;
-    group.append(shape('line', { class: 'rung', x1: fixed(x - px), y1: fixed(y - py), x2: fixed(x + px), y2: fixed(y + py) }));
-  }
+  const rails = [-1, 1].map((side) => ({ x1: fixed(start.x + px * side), y1: fixed(start.y + py * side), x2: fixed(end.x + px * side), y2: fixed(end.y + py * side) }));
+  // Each piece is drawn twice: a dark edge, then the face on top of it.
+  for (const rung of rungs) group.append(shape('line', { class: 'rung-edge', ...rung }));
+  for (const rung of rungs) group.append(shape('line', { class: 'rung', ...rung }));
+  for (const rail of rails) group.append(shape('line', { class: 'rail-edge', ...rail }));
+  for (const rail of rails) group.append(shape('line', { class: 'rail', ...rail }));
   return group;
 }
 
@@ -159,24 +166,52 @@ function drawSnake(from, to, index) {
     const t = step / 60;
     // The wave fades out at both ends so the body meets the square centres.
     const sway = Math.sin(t * Math.PI * waves) * Math.sin(t * Math.PI) * 2.3;
-    points.push(`${fixed(head.x + ux * length * t - uy * sway)} ${fixed(head.y + uy * length * t + ux * sway)}`);
+    points.push({ x: head.x + ux * length * t - uy * sway, y: head.y + uy * length * t + ux * sway });
   }
-  const d = `M${points.join('L')}`;
+  const path = (first, last, shift = 0) => `M${points.slice(first, last + 1).map((point, i, all) => {
+    // Offset sideways for the highlight, along the local direction of the body.
+    const next = all[Math.min(i + 1, all.length - 1)];
+    const previous = all[Math.max(i - 1, 0)];
+    const dx = next.x - previous.x;
+    const dy = next.y - previous.y;
+    const size = Math.hypot(dx, dy) || 1;
+    return `${fixed(point.x - (dy / size) * shift)} ${fixed(point.y + (dx / size) * shift)}`;
+  }).join('L')}`;
   const group = shape('g', { class: `snake snake-${index % 2}` });
-  group.append(shape('path', { class: 'snake-body', d }), shape('path', { class: 'snake-stripe', d }));
-  group.append(shape('circle', { class: 'snake-head', cx: fixed(head.x), cy: fixed(head.y), r: 2 }));
+  // The body tapers to the tail in three widths: an edge first, then the body over it.
+  const segments = [[0, 49, 2.9], [48, 55, 2.05], [54, 60, 1.15]];
+  for (const [first, last, width] of segments) group.append(shape('path', { class: 'snake-edge', d: path(first, last), 'stroke-width': fixed(width + 0.5) }));
+  for (const [first, last, width] of segments) group.append(shape('path', { class: 'snake-body', d: path(first, last), 'stroke-width': width }));
+  group.append(shape('path', { class: 'snake-stripe', d: path(2, 52) }));
+  group.append(shape('path', { class: 'snake-shine', d: path(3, 50, -0.75) }));
+
+  // A head that points away from the tail, with eyes, nostrils, and a little shine.
+  const fx = -ux;
+  const fy = -uy;
+  const angle = (Math.atan2(fy, fx) * 180) / Math.PI;
+  const cx = head.x + fx * 0.3;
+  const cy = head.y + fy * 0.3;
+  const at = (along, across) => ({ x: fixed(cx + fx * along - fy * across), y: fixed(cy + fy * along + fx * across) });
+  group.append(shape('ellipse', { class: 'snake-head', cx: fixed(cx), cy: fixed(cy), rx: 2.9, ry: 2.35, transform: `rotate(${fixed(angle)} ${fixed(cx)} ${fixed(cy)})` }));
+  const shine = at(-0.2, -1.05);
+  group.append(shape('ellipse', { class: 'head-shine', cx: shine.x, cy: shine.y, rx: 1.1, ry: 0.45, transform: `rotate(${fixed(angle)} ${shine.x} ${shine.y})` }));
   for (const side of [-1, 1]) {
-    group.append(shape('circle', { class: 'snake-eye', cx: fixed(head.x - ux * 0.5 - uy * 0.8 * side), cy: fixed(head.y - uy * 0.5 + ux * 0.8 * side), r: 0.42 }));
+    const nostril = at(2.35, side * 0.55);
+    group.append(shape('circle', { class: 'snake-nostril', cx: nostril.x, cy: nostril.y, r: 0.17 }));
+    const eye = at(0.5, side * 1.15);
+    group.append(shape('circle', { class: 'snake-eye', cx: eye.x, cy: eye.y, r: 0.82 }));
+    const pupil = at(0.8, side * 1.15);
+    group.append(shape('circle', { class: 'snake-pupil', cx: pupil.x, cy: pupil.y, r: 0.4 }));
   }
   // Theme extras, each shown only by its own theme: a forked tongue and a Santa hat.
-  const tip = { x: head.x - ux * 1.8, y: head.y - uy * 1.8 };
-  const fork = { x: head.x - ux * 3.1, y: head.y - uy * 3.1 };
+  const tip = at(2.85, 0);
+  const fork = at(4.1, 0);
   group.append(shape('path', {
     class: 'snake-tongue',
-    d: `M${fixed(tip.x)} ${fixed(tip.y)}L${fixed(fork.x)} ${fixed(fork.y)}` +
-      `l${fixed(-ux * 0.8 - uy * 0.6)} ${fixed(-uy * 0.8 + ux * 0.6)}M${fixed(fork.x)} ${fixed(fork.y)}l${fixed(-ux * 0.8 + uy * 0.6)} ${fixed(-uy * 0.8 - ux * 0.6)}`,
+    d: `M${tip.x} ${tip.y}L${fork.x} ${fork.y}` +
+      `l${fixed(fx * 0.8 - fy * 0.6)} ${fixed(fy * 0.8 + fx * 0.6)}M${fork.x} ${fork.y}l${fixed(fx * 0.8 + fy * 0.6)} ${fixed(fy * 0.8 - fx * 0.6)}`,
   }));
-  const hat = shape('g', { class: 'snake-hat', transform: `translate(${fixed(head.x)} ${fixed(head.y - 0.7)}) rotate(${index % 2 ? 14 : -14})` });
+  const hat = shape('g', { class: 'snake-hat', transform: `translate(${fixed(cx)} ${fixed(cy - 1.1)}) rotate(${index % 2 ? 14 : -14})` });
   hat.append(
     shape('path', { class: 'hat-cone', d: 'M-1.9 -0.8L1.9 -0.8L0.9 -4.9Z' }),
     shape('rect', { class: 'hat-fur', x: -2.2, y: -1.4, width: 4.4, height: 1.2, rx: 0.6 }),
