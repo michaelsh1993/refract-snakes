@@ -1,4 +1,4 @@
-import { BOARD_THEMES, LADDERS, LAST_SQUARE, SEATS, SNAKES, boardTheme, createGame, skipTurn, nextRound, playRoll, rollDie } from './game.js';
+import { BOARD_THEMES, LADDERS, LAST_SQUARE, POWER_UPS, SEATS, SNAKES, boardTheme, canChangeMode, createGame, setMode, skipTurn, usePower, nextRound, playRoll, rollDie } from './game.js';
 import { THEME_COOLDOWN_MS, TURN_MS, TURN_SETTLE_MS, createSession } from './session.js';
 import { connectActivity } from './bridge.js';
 
@@ -66,6 +66,8 @@ const warningTick = (secondsLeft) => tone(660 + (5 - secondsLeft) * 90, 0.13, { 
 const timeUp = () => { tone(330, 0.16, { type: 'triangle', volume: 0.22 }); tone(220, 0.34, { type: 'triangle', volume: 0.22, at: 0.17 }); };
 
 let mode = 'computer';
+// Classic or Chaos, for local practice. In Refract the game state carries the mode.
+let gameMode = 'classic';
 let playerCount = 2;
 let localState = createGame(localPlayers(), savedBoardTheme());
 let liveView = null;
@@ -338,13 +340,47 @@ function describeRoll(state, mine) {
   const roll = state.lastRoll;
   const you = roll.seat === mine && (embedded || mode === 'computer');
   let text = `${you ? 'You' : nameFor(roll.seat, state)} rolled ${roll.die}`;
+  if (roll.steps === roll.die * 2) text += ` (doubled to ${roll.steps})`;
+  else if (roll.steps < 0) text += `, slipped on a banana, went back ${-roll.steps}`;
   if (roll.via === 'overshoot') text += ` and ${you ? 'need' : 'needs'} exactly ${LAST_SQUARE - roll.from} to finish.`;
   else if (roll.via === 'ladder') text += ` and climbed a ladder from ${roll.landed} to ${roll.to}.`;
   else if (roll.via === 'snake') text += ` and slid down a snake from ${roll.landed} to ${roll.to}.`;
   else if (roll.to === LAST_SQUARE) text += ' and reached 100.';
   else text += ` and moved to ${roll.to}.`;
   if (roll.die === 6 && state.winner === null) text += ' A six: roll again.';
-  return text;
+  return text + frozenNote(state);
+}
+
+/** Players frozen out of their turn as it passed on. */
+function frozenNote(state) {
+  if (!state.lastFrozen?.length) return '';
+  const names = state.lastFrozen.map((seat) => nameFor(seat, state));
+  return ` ${names.join(' and ')} ${names.length > 1 ? 'are' : 'is'} frozen and ${names.length > 1 ? 'miss' : 'misses'} a turn.`;
+}
+
+/** What the last power-up did, in a sentence. */
+function describePower(state, mine) {
+  const used = state.lastPower;
+  if (!used) return '';
+  const local = embedded || mode === 'computer';
+  const who = (seat, start = false) => (seat === mine && local ? (start ? 'You' : 'you') : nameFor(seat, state));
+  const actor = who(used.seat, true);
+  const target = used.target !== null ? who(used.target) : '';
+  const blocked = used.blocked.map((seat) => who(seat));
+  const landing = (seat) => used.moves.find((entry) => entry[0] === seat)?.[2];
+  const shieldNote = blocked.length ? ` ${blocked.join(' and ')} blocked it with a shield.` : '';
+  switch (used.power) {
+    case 'rocket': return `${actor} fired a rocket and blasted up to ${landing(used.seat) ?? state.positions[used.seat]}.`;
+    case 'double': return `${actor} loaded the dice: the next roll counts double.`;
+    case 'shield': return `${actor} raised a shield.`;
+    case 'bite': return blocked.length ? `${actor} tried to bite ${target}, but the shield held.` : `${actor} bit ${target}, sending them back to ${landing(used.target) ?? state.positions[used.target]}.`;
+    case 'swap': return blocked.length ? `${actor} tried to swap with ${target}, but the shield held.` : `${actor} swapped places with ${target}.`;
+    case 'freeze': return blocked.length ? `${actor} tried to freeze ${target}, but the shield held.` : `${actor} froze ${target}: they miss their next turn.`;
+    case 'banana': return blocked.length ? `${actor} threw a banana at ${target}, but the shield held.` : `${actor} slipped a banana under ${target}: their next roll goes backwards.`;
+    case 'lightning': return `${actor} struck every rival with lightning!${shieldNote}`;
+    case 'shuffle': return `${actor} shuffled the board!${shieldNote}`;
+    default: return '';
+  }
 }
 
 const still = () => !!reducedMotion?.matches || document.hidden;
@@ -614,7 +650,7 @@ function syncTokens(state, sessionKey) {
   // Finish any earlier move before judging whether this one can be animated.
   if (tokenState && key !== tokenKey) shown = [...tokenState.positions];
   const roll = state.lastRoll;
-  const animate = tokenKey !== null && key !== tokenKey && roll !== null && roll.to !== roll.from &&
+  const animate = tokenKey !== null && key !== tokenKey && state.lastEvent === 'roll' && roll !== null && roll.to !== roll.from &&
     shown[roll.seat] === roll.from && !reducedMotion?.matches && !document.hidden;
   tokenKey = key;
   tokenState = state;
@@ -623,6 +659,7 @@ function syncTokens(state, sessionKey) {
   }
   tokens.forEach((token) => token.classList.remove('slide'));
   if (!animate) {
+    if (state.lastEvent === 'power') for (const [seat] of state.lastPower?.moves ?? []) tokens[seat].classList.add('slide');
     placeTokens();
     return;
   }
@@ -667,6 +704,7 @@ function render() {
     if (state.winner === seat) detail = 'Winner of this round';
     if (embedded) detail = state.players[seat] === null ? 'Invite someone from your call' : `${state.players[seat] === selfId ? 'You · ' : ''}${detail}`;
     $(`detail-${seat}`).textContent = detail;
+    $(`badges-${seat}`).textContent = badgesFor(state, seat);
     $(`score-${seat}`).textContent = state.scores[seat];
   }
 
@@ -686,9 +724,10 @@ function render() {
     statusSeat = state.winner;
   } else {
     status = canRoll && (embedded || mode === 'computer') ? 'Your roll' : `${nameFor(state.turn, state)}’s roll`;
-    if (state.lastSkip !== null) {
+    if (state.lastEvent === 'power') detail = describePower(state, mine);
+    else if (state.lastEvent === 'skip' && state.lastSkip !== null) {
       const you = state.lastSkip === mine && (embedded || mode === 'computer');
-      detail = `${you ? 'You' : nameFor(state.lastSkip, state)} ran out of time.`;
+      detail = `${you ? 'You' : nameFor(state.lastSkip, state)} ran out of time.${frozenNote(state)}`;
     } else if (state.lastRoll) detail = describeRoll(state, mine);
     else detail = canRoll ? (manualRoll() ? 'Roll when you’re ready.' : 'Grab the die and fling it.') : mine !== null ? 'Good things come to those who wait.' : 'You’ve got the best seat to watch.';
     statusSeat = state.turn;
@@ -712,6 +751,9 @@ function render() {
   miniDie.dataset.value = String(value);
   miniDie.dataset.seat = state.lastRoll ? String(state.lastRoll.seat) : 'none';
   miniDie.setAttribute('aria-label', value ? `Last roll: ${value}` : 'No roll yet');
+  renderPowers(state, { mine, canPlay: canRoll && state.mode === 'chaos' && !state.powerUsed });
+  renderGameMode(state, ready, mine);
+  announcePower(state, mine);
   $('roll').disabled = !canRoll;
   rollSeat = canRoll ? state.turn : null;
   // On this player's turn the die simply appears, ready to throw. With reduced motion the
@@ -827,12 +869,163 @@ function scheduleComputer() {
   clearTimeout(computerTimer);
   if (embedded || mode !== 'computer' || localState.winner !== null || localState.turn === 0) return;
   // Long enough for the previous throw to land and its token to finish moving.
-  computerTimer = setTimeout(localRoll, reducedMotion?.matches ? 1400 : 4000);
+  computerTimer = setTimeout(computerTurn, reducedMotion?.matches ? 1400 : 4000);
+}
+
+/** A computer may play a power-up first, usually on whoever is winning, then rolls. */
+function computerTurn() {
+  const state = localState;
+  const seat = state.turn;
+  const hand = state.hands[seat];
+  if (state.mode === 'chaos' && !state.powerUsed && hand.length && Math.random() < 0.6) {
+    const rivals = SEATS.filter((other) => other !== seat && state.players[other] !== null);
+    const leader = rivals.reduce((best, other) => (state.positions[other] > state.positions[best] ? other : best), rivals[0]);
+    const behind = state.positions[leader] > state.positions[seat];
+    // Prefer an attack when someone is ahead, and a boost when leading.
+    const pick = hand.findIndex((power) => (behind ? POWER_UPS[power].aim !== 'self' : POWER_UPS[power].aim === 'self'));
+    const slot = pick >= 0 ? pick : 0;
+    const next = usePower(state, state.players[seat], slot, POWER_UPS[hand[slot]].aim === 'other' ? leader : null);
+    if (next !== state) {
+      localState = next;
+      render();
+      computerTimer = setTimeout(localRoll, reducedMotion?.matches ? 900 : 2200);
+      return;
+    }
+  }
+  localRoll();
+}
+
+// ---------- Chaos mode: power-up tray, target picker, mode switch, banner ----------
+let aiming = null;
+
+function badgesFor(state, seat) {
+  if (state.mode !== 'chaos' || state.players[seat] === null) return '';
+  const effect = state.effects[seat];
+  const marks = [];
+  if (effect.shield) marks.push('🛡️');
+  if (effect.frozen) marks.push(`🧊${effect.frozen > 1 ? '×2' : ''}`);
+  if (effect.banana) marks.push('🍌');
+  if (effect.double) marks.push('🎲×2');
+  marks.push(`🎁${state.hands[seat].length}`);
+  return marks.join(' ');
+}
+
+function playPower(slot, target = null) {
+  aiming = null;
+  if (embedded) session.usePower(slot, target);
+  else {
+    const next = usePower(localState, localState.players[localState.turn], slot, target);
+    if (next === localState) return;
+    localState = next;
+  }
+  render();
+}
+
+function renderPowers(state, { mine, canPlay }) {
+  const tray = $('powers');
+  const show = state.mode === 'chaos' && mine !== null && state.players[mine] !== null;
+  tray.hidden = !show;
+  if (!show) { aiming = null; return; }
+  const hand = state.hands[mine];
+  $('powers-note').textContent = !hand.length ? 'All used' : state.powerUsed && mine === state.turn ? 'Used this turn' : canPlay ? 'Play one, then throw' : 'On your turn';
+  const key = JSON.stringify([hand, canPlay]);
+  const slots = $('power-slots');
+  if (slots.dataset.key !== key) {
+    slots.dataset.key = key;
+    slots.replaceChildren(...hand.map((power, slot) => {
+      const info = POWER_UPS[power];
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'power';
+      button.disabled = !canPlay;
+      button.title = info.blurb;
+      button.setAttribute('aria-label', `${info.name}: ${info.blurb}`);
+      const icon = document.createElement('span');
+      icon.className = 'power-icon';
+      icon.textContent = info.icon;
+      const name = document.createElement('span');
+      name.className = 'power-name';
+      name.textContent = info.name;
+      button.append(icon, name);
+      button.addEventListener('click', () => {
+        if (info.aim === 'other') {
+          aiming = slot;
+          render();
+        } else playPower(slot);
+      });
+      return button;
+    }));
+  }
+  if (!canPlay || aiming === null || !hand[aiming]) aiming = null;
+  const targets = $('power-targets');
+  targets.hidden = aiming === null;
+  if (aiming !== null) {
+    const info = POWER_UPS[hand[aiming]];
+    $('target-prompt').textContent = `${info.icon} ${info.name} on…`;
+    const rivals = SEATS.filter((seat) => seat !== mine && state.players[seat] !== null);
+    $('target-buttons').replaceChildren(...rivals.map((seat) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'target';
+      button.dataset.seat = String(seat);
+      button.textContent = `${nameFor(seat, state)} · ${state.positions[seat] || 'start'}`;
+      const slot = aiming;
+      button.addEventListener('click', () => playPower(slot, seat));
+      return button;
+    }));
+  }
+}
+
+function renderGameMode(state, ready, mine) {
+  const changeable = canChangeMode(state) && ready && (!embedded || mine !== null);
+  for (const button of document.querySelectorAll('[data-game-mode]')) {
+    button.setAttribute('aria-pressed', String(button.dataset.gameMode === state.mode));
+    // Locally a switch just starts a new game; in Refract it waits for a fresh round.
+    button.disabled = embedded ? !changeable && button.dataset.gameMode !== state.mode : false;
+  }
+  $('game-mode-scope').textContent = embedded ? 'EVERYONE PLAYS IT' : '';
+  $('game-mode-hint').textContent = state.mode === 'chaos'
+    ? 'Everyone gets three random power-ups each round. Play one per turn before you throw.'
+    : embedded && !changeable ? 'Plain snakes and ladders. Switch modes before anyone moves, or after a round.' : 'Plain snakes and ladders.';
+}
+
+let bannerKey;
+let bannerTimer = null;
+function announcePower(state, mine) {
+  const key = `${state.round}:${state.powers}`;
+  const fresh = bannerKey !== undefined && key !== bannerKey && state.lastEvent === 'power' && state.lastPower;
+  bannerKey = key;
+  if (!fresh) return;
+  const banner = $('banner');
+  banner.dataset.seat = String(state.lastPower.seat);
+  $('banner-icon').textContent = POWER_UPS[state.lastPower.power].icon;
+  $('banner-text').textContent = describePower(state, mine);
+  banner.hidden = false;
+  banner.classList.remove('pop');
+  void banner.offsetWidth;
+  banner.classList.add('pop');
+  clearTimeout(bannerTimer);
+  bannerTimer = setTimeout(() => { banner.hidden = true; }, 2600);
+}
+
+$('target-cancel').addEventListener('click', () => { aiming = null; render(); });
+
+for (const button of document.querySelectorAll('[data-game-mode]')) {
+  button.addEventListener('click', () => {
+    const chosen = button.dataset.gameMode;
+    if (embedded) {
+      session.setMode(chosen);
+      return;
+    }
+    if (chosen === gameMode) return;
+    gameMode = chosen;
+    resetLocal();
+  });
 }
 
 function resetLocal() {
   clearTimeout(computerTimer);
-  localState = createGame(localPlayers(), localState.theme);
+  localState = createGame(localPlayers(), localState.theme, gameMode);
   $('mode-computer').setAttribute('aria-pressed', String(mode === 'computer'));
   $('mode-local').setAttribute('aria-pressed', String(mode === 'local'));
   for (const button of document.querySelectorAll('[data-count]')) {
@@ -933,7 +1126,39 @@ $('sync').addEventListener('click', () => {
 });
 $('leave').addEventListener('click', () => bridge?.close());
 
+/**
+ * Refract loads a refreshed activity at a new address (with a `refract-refresh` value), but
+ * the browser may still hold the old scripts and styles: GitHub Pages lets it keep them
+ * for ten minutes. Once per refresh, re-check each of this page's own files with the
+ * server, and reload if any of them changed.
+ */
+async function reloadIfStale() {
+  try {
+    const revision = new URL(location.href).searchParams.get('refract-refresh');
+    if (!revision) return;
+    const marker = `refract-snakes-and-ladders:refreshed:${revision}`;
+    if (sessionStorage.getItem(marker)) return;
+    sessionStorage.setItem(marker, '1');
+    const files = new Set([location.href.split('#')[0]]);
+    for (const entry of performance.getEntriesByType('resource')) {
+      const url = new URL(entry.name);
+      if (url.origin === location.origin) files.add(url.href.split('#')[0]);
+    }
+    const tag = (response) => response.headers.get('etag') ?? response.headers.get('last-modified');
+    const changed = await Promise.all([...files].map(async (url) => {
+      try {
+        const before = tag(await fetch(url, { cache: 'force-cache' }));
+        const after = tag(await fetch(url, { cache: 'no-cache' }));
+        return !!before && !!after && before !== after;
+      } catch { return false; }
+    }));
+    if (changed.includes(true)) location.reload();
+  } catch { /* Staying on this copy is the safe fallback. */ }
+}
+
 if (embedded) {
+  if (document.readyState === 'complete') void reloadIfStale();
+  else window.addEventListener('load', () => void reloadIfStale(), { once: true });
   bridge = connectActivity({
     onInit(message) {
       clearTimeout(handshakeTimer);

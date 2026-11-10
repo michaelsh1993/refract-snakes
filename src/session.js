@@ -1,4 +1,4 @@
-import { BOARD_THEMES, MAX_PLAYERS, createGame, isValidGame, nextRound, playRoll, rollDie as fairDie, seatPlayers, skipTurn } from './game.js';
+import { BOARD_THEMES, GAME_MODES, MAX_PLAYERS, createGame, isValidGame, nextRound, playRoll, rollDie as fairDie, seatPlayers, setMode as switchMode, skipTurn, usePower } from './game.js';
 
 export const GAME_PROTOCOL = 'refract-snakes-and-ladders/1';
 
@@ -47,6 +47,8 @@ function defaultTimer(run, ms) {
 export function createSession({
   send, onChange, storage = browserStorage(), rollDie = fairDie, theme: preferredTheme = 'classic',
   now = () => Date.now(), setTimer = defaultTimer, clearTimer = (timer) => clearTimeout(timer),
+  // Deals power-ups and shuffles squares. Only the host's matters.
+  random = Math.random,
 }) {
   // A new game starts on this viewer's preferred board; the host's copy wins once connected.
   let state = createGame([], preferredTheme);
@@ -61,6 +63,7 @@ export function createSession({
   let acceptedHostId = null;
   let pendingSync = null;
   let lastThemeAt = -Infinity;
+  let lastModeAt = -Infinity;
   let turnTimer = null;
   let turnKey = null;
   let timedRolls = null;
@@ -100,7 +103,7 @@ export function createSession({
       const fresh = state;
       state = saved.state;
       if (isHost()) {
-        state = seatPlayers(state, assignSeats());
+        state = seatPlayers(state, assignSeats(), random);
         if (!isValidGame(state, ids())) state = fresh;
       }
     } catch { /* Ignore invalid or unavailable saved state. */ }
@@ -180,7 +183,7 @@ export function createSession({
     if (isHost()) {
       // The game carries on through arrivals, departures, and a change of host:
       // a newcomer starts from square zero and a departed token leaves the board.
-      const reseated = seatPlayers(state, assignSeats());
+      const reseated = seatPlayers(state, assignSeats(), random);
       const seatsChanged = reseated !== state;
       state = reseated;
       if (leadershipChanged && oldHost !== null) notice = 'The host left. The game carries on from here.';
@@ -252,7 +255,19 @@ export function createSession({
       if (next === state) return false;
       state = next;
     } else if (data.kind === 'rematch' && state.winner !== null) {
-      state = nextRound(state);
+      state = nextRound(state, random);
+    } else if (data.kind === 'power') {
+      // One power-up per turn: the power count stops a duplicate request playing twice.
+      if (data.powers !== state.powers || data.rolls !== state.rolls) return false;
+      const next = usePower(state, from, data.slot, data.target ?? null, random);
+      if (next === state) return false;
+      state = next;
+    } else if (data.kind === 'mode') {
+      if (now() - lastModeAt < THEME_COOLDOWN_MS) return false;
+      const next = switchMode(state, data.mode, random);
+      if (next === state) return false;
+      lastModeAt = now();
+      state = next;
     } else return false;
     notice = '';
     emit();
@@ -300,12 +315,12 @@ export function createSession({
       if (typeof data.theme === 'string' && BOARD_THEMES.includes(data.theme) && data.theme !== state.theme) applyTheme(data.theme);
       return;
     }
-    if (isHost() && (data.kind === 'roll' || data.kind === 'rematch')) {
+    if (isHost() && ['roll', 'rematch', 'power', 'mode'].includes(data.kind)) {
       if (!applyAction(from, data)) snapshot([from]);
     }
   }
 
-  function action(kind) {
+  function action(kind, extra = {}) {
     if (destroyed || !self || !connected || !isMember(self.id)) return;
     if (!seated(self.id)) {
       notice = 'You are watching. A seat opens when a player leaves.';
@@ -319,7 +334,14 @@ export function createSession({
     }
     if (kind === 'roll' && (state.winner !== null || state.players[state.turn] !== self.id)) return;
     if (kind === 'rematch' && state.winner === null) return;
-    const data = { kind, round: state.round, ...(kind === 'roll' ? { rolls: state.rolls } : {}) };
+    if (kind === 'power' && (state.mode !== 'chaos' || state.powerUsed || state.players[state.turn] !== self.id)) return;
+    if (kind === 'mode' && (!GAME_MODES.includes(extra.mode) || extra.mode === state.mode)) return;
+    const data = {
+      kind, round: state.round,
+      ...(kind === 'roll' || kind === 'power' ? { rolls: state.rolls } : {}),
+      ...(kind === 'power' ? { powers: state.powers, slot: extra.slot, target: extra.target ?? null } : {}),
+      ...(kind === 'mode' ? { mode: extra.mode } : {}),
+    };
     if (isHost()) applyAction(self.id, data);
     else transmit(kind, data, [hostId]);
   }
@@ -337,6 +359,10 @@ export function createSession({
     receive,
     roll: () => action('roll'),
     rematch: () => action('rematch'),
+    // Chaos mode: play the power-up in a hand slot, aimed at a seat when it needs one.
+    usePower: (slot, target = null) => action('power', { slot, target }),
+    // Any seated player may switch modes before anyone moves, or between rounds.
+    setMode: (mode) => action('mode', { mode }),
     sync,
     destroy() {
       destroyed = true;

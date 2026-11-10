@@ -22,6 +22,11 @@
           <div class="turn-copy"><p id="status" role="status" aria-live="polite">Your roll</p><p id="status-detail" role="status" aria-live="polite">Grab the die and fling it.</p></div>
         </div>
         <div id="countdown" class="countdown" data-seat="0" hidden><span class="countdown-track"><span id="countdown-bar" class="countdown-bar"></span></span><span class="countdown-label"><strong id="countdown-seconds">15</strong>s</span></div>
+        <div id="powers" class="powers" hidden>
+          <div class="powers-head"><span>POWER-UPS</span><span id="powers-note"></span></div>
+          <div id="power-slots" class="power-slots"></div>
+          <div id="power-targets" class="power-targets" hidden><span id="target-prompt">Use it on…</span><div id="target-buttons" class="target-buttons"></div><button type="button" id="target-cancel" class="text-button">Cancel</button></div>
+        </div>
         <div class="roll-row">
           <span id="die" class="die" data-value="0" role="img" aria-label="No roll yet"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
           <button class="primary-button roll-button" id="roll" type="button" disabled>Roll the dice</button>
@@ -42,14 +47,22 @@
       <aside class="details">
         <section class="players" aria-labelledby="players-heading">
           <div class="section-heading"><h2 id="players-heading">Players</h2><span id="player-count" class="small-label">2 PLAYERS</span></div>
-          <div class="player-card" id="player-0" data-seat="0"><span class="player-token" aria-hidden="true">1</span><div class="player-copy"><h3 id="name-0">You</h3><span id="detail-0">At the start</span></div><span class="player-score"><strong id="score-0">0</strong><span>WINS</span></span></div>
-          <div class="player-card" id="player-1" data-seat="1"><span class="player-token" aria-hidden="true">2</span><div class="player-copy"><h3 id="name-1">Computer</h3><span id="detail-1">At the start</span></div><span class="player-score"><strong id="score-1">0</strong><span>WINS</span></span></div>
-          <div class="player-card" id="player-2" data-seat="2" hidden><span class="player-token" aria-hidden="true">3</span><div class="player-copy"><h3 id="name-2">Player 3</h3><span id="detail-2">At the start</span></div><span class="player-score"><strong id="score-2">0</strong><span>WINS</span></span></div>
-          <div class="player-card" id="player-3" data-seat="3" hidden><span class="player-token" aria-hidden="true">4</span><div class="player-copy"><h3 id="name-3">Player 4</h3><span id="detail-3">At the start</span></div><span class="player-score"><strong id="score-3">0</strong><span>WINS</span></span></div>
+          <div class="player-card" id="player-0" data-seat="0"><span class="player-token" aria-hidden="true">1</span><div class="player-copy"><h3 id="name-0">You</h3><span id="detail-0">At the start</span><span class="badges" id="badges-0"></span></div><span class="player-score"><strong id="score-0">0</strong><span>WINS</span></span></div>
+          <div class="player-card" id="player-1" data-seat="1"><span class="player-token" aria-hidden="true">2</span><div class="player-copy"><h3 id="name-1">Computer</h3><span id="detail-1">At the start</span><span class="badges" id="badges-1"></span></div><span class="player-score"><strong id="score-1">0</strong><span>WINS</span></span></div>
+          <div class="player-card" id="player-2" data-seat="2" hidden><span class="player-token" aria-hidden="true">3</span><div class="player-copy"><h3 id="name-2">Player 3</h3><span id="detail-2">At the start</span><span class="badges" id="badges-2"></span></div><span class="player-score"><strong id="score-2">0</strong><span>WINS</span></span></div>
+          <div class="player-card" id="player-3" data-seat="3" hidden><span class="player-token" aria-hidden="true">4</span><div class="player-copy"><h3 id="name-3">Player 4</h3><span id="detail-3">At the start</span><span class="badges" id="badges-3"></span></div><span class="player-score"><strong id="score-3">0</strong><span>WINS</span></span></div>
           <p id="spectators" class="spectator-note" hidden></p>
         </section>
         <div class="game-actions"><span id="round-note">A fresh board. Mind the snakes.</span><button class="primary-button" id="next-round" type="button" disabled>Next round <span aria-hidden="true">↗</span></button></div>
         <p id="notice" class="notice" role="status" hidden></p>
+        <section class="game-mode-picker" aria-labelledby="game-mode-heading">
+          <div class="section-heading"><h2 id="game-mode-heading">Game mode</h2><span id="game-mode-scope" class="small-label"></span></div>
+          <div class="theme-options" role="group" aria-label="Game mode">
+            <button type="button" data-game-mode="classic" aria-pressed="true"><span class="mode-icon" aria-hidden="true">🎯</span>Classic</button>
+            <button type="button" data-game-mode="chaos" aria-pressed="false"><span class="mode-icon" aria-hidden="true">💥</span>Chaos</button>
+          </div>
+          <p id="game-mode-hint" class="mode-hint">Plain snakes and ladders.</p>
+        </section>
         <section class="theme-picker" aria-labelledby="theme-heading">
           <div class="section-heading"><h2 id="theme-heading">Board</h2><span id="theme-scope" class="small-label"></span></div>
           <div class="theme-options" role="group" aria-label="Board theme">
@@ -69,6 +82,7 @@
         <div id="refract-info" class="refract-info" hidden><p id="seat-description">Your seat is being prepared.</p><div class="refract-actions"><button id="sync" class="text-button" type="button">Resync <span aria-hidden="true">↻</span></button><button id="leave" class="text-button leave-button" type="button">Leave game <span aria-hidden="true">↗</span></button></div></div>
       </aside>
     </main>
+    <div id="banner" class="banner" data-seat="none" role="status" aria-live="polite" hidden><span id="banner-icon" class="banner-icon" aria-hidden="true"></span><span id="banner-text" class="banner-text"></span></div>
     <div id="throw" class="throw" data-seat="none" aria-hidden="true"><span id="big-die" class="die big-die" data-value="0"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span><span id="throw-hint" class="throw-hint">Your roll. Grab the die and fling it.</span></div>
     <noscript>This activity needs JavaScript to play. Enable JavaScript, then reload this page.</noscript>
   </body>

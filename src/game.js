@@ -4,13 +4,39 @@ export const SEATS = Object.freeze([0, 1, 2, 3]);
 // Board themes are cosmetic, but shared: everyone in a game sees the same board.
 export const BOARD_THEMES = Object.freeze(['classic', 'christmas', 'jungle', 'space']);
 export const boardTheme = (theme) => (BOARD_THEMES.includes(theme) ? theme : 'classic');
+// Classic is plain snakes and ladders; Chaos deals everyone power-ups to use on each other.
+export const GAME_MODES = Object.freeze(['classic', 'chaos']);
 
 // Foot of each ladder → top, and head of each snake → tail.
 export const LADDERS = Object.freeze({ 4: 25, 13: 46, 33: 49, 42: 63, 50: 69, 62: 81, 74: 92 });
 export const SNAKES = Object.freeze({ 27: 5, 40: 3, 43: 18, 54: 31, 66: 45, 76: 58, 89: 53, 99: 41 });
 
+/**
+ * Chaos mode power-ups. `aim` says who it hits: 'self', one 'other' player, or 'all'
+ * the other players. A shield blocks the next power-up aimed at its owner.
+ */
+export const POWER_UPS = Object.freeze({
+  rocket: { name: 'Rocket', icon: '🚀', aim: 'self', blurb: 'Blast 8 squares ahead (never onto 100).' },
+  double: { name: 'Double dice', icon: '🎲', aim: 'self', blurb: 'Your next roll counts twice.' },
+  shield: { name: 'Shield', icon: '🛡️', aim: 'self', blurb: 'Blocks the next power-up used on you.' },
+  bite: { name: 'Snake bite', icon: '🐍', aim: 'other', blurb: 'Send a rival back 10 squares.' },
+  swap: { name: 'Swap', icon: '🔄', aim: 'other', blurb: 'Trade places with a rival.' },
+  freeze: { name: 'Freeze', icon: '🧊', aim: 'other', blurb: 'A rival misses their next turn.' },
+  banana: { name: 'Banana', icon: '🍌', aim: 'other', blurb: 'A rival’s next roll goes backwards.' },
+  lightning: { name: 'Lightning', icon: '⚡', aim: 'all', blurb: 'Every rival slides back 6 squares.' },
+  shuffle: { name: 'Shuffle', icon: '🌀', aim: 'all', blurb: 'Everyone swaps squares at random.' },
+});
+const POWER_IDS = Object.freeze(Object.keys(POWER_UPS));
+export const HAND_SIZE = 3;
+const ROCKET_SQUARES = 8;
+const BITE_SQUARES = 10;
+const LIGHTNING_SQUARES = 6;
+const MAX_FROZEN = 2;
+
 const isSeat = (value) => Number.isInteger(value) && value >= 0 && value < MAX_PLAYERS;
 const seatList = (players = []) => SEATS.map((seat) => players[seat] ?? null);
+const calm = () => ({ frozen: 0, banana: false, double: false, shield: false });
+const calmAll = () => SEATS.map(calm);
 
 /** A fair die. The coordinating participant rolls for everyone in a shared game. */
 export function rollDie() {
@@ -38,10 +64,19 @@ export function startingSeat(round, players) {
   return players[preferred] !== null ? preferred : nextSeat(players, preferred);
 }
 
-export function createGame(players = [1, 2], theme = 'classic') {
+/** A fresh hand of power-ups for every seated player (Chaos mode only). */
+function deal(players, mode, random) {
+  return SEATS.map((seat) => (mode === 'chaos' && players[seat] !== null
+    ? Array.from({ length: HAND_SIZE }, () => POWER_IDS[Math.floor(random() * POWER_IDS.length) % POWER_IDS.length])
+    : []));
+}
+
+export function createGame(players = [1, 2], theme = 'classic', mode = 'classic', random = Math.random) {
   const seats = seatList(players);
+  const chosen = GAME_MODES.includes(mode) ? mode : 'classic';
   return {
     theme: boardTheme(theme),
+    mode: chosen,
     positions: [0, 0, 0, 0],
     players: seats,
     turn: startingSeat(1, seats),
@@ -52,20 +87,58 @@ export function createGame(players = [1, 2], theme = 'classic') {
     // Every roll ever thrown in this game. A roll is identified by this count, not by
     // the revision, which also moves for theme and seat changes.
     rolls: 0,
-    // Turns that ran out of time, and the seat that last ran out (cleared by the next roll).
+    // Turns that ran out of time, and the seat that last ran out.
     skips: 0,
     lastSkip: null,
+    // What happened most recently: 'roll', 'skip', 'power', or null at the start of a round.
+    lastEvent: null,
+    // Players frozen out of their turn when it last passed on.
+    lastFrozen: [],
+    // Chaos mode: each seat's power-ups and lingering effects, whether this turn's
+    // power-up has been used, and the last power-up played.
+    hands: deal(seats, chosen, random),
+    effects: calmAll(),
+    powerUsed: false,
+    powers: 0,
+    lastPower: null,
     revision: 0,
   };
+}
+
+/** Slide down a snake or up a ladder from the square a token lands on. */
+function settle(landed) {
+  if (LADDERS[landed] !== undefined) return { landed, to: LADDERS[landed], via: 'ladder' };
+  if (SNAKES[landed] !== undefined) return { landed, to: SNAKES[landed], via: 'snake' };
+  return { landed, to: landed, via: null };
 }
 
 /** Where a token ends up. The final square needs an exact roll. */
 export function resolveRoll(from, die) {
   if (from + die > LAST_SQUARE) return { landed: from, to: from, via: 'overshoot' };
-  const landed = from + die;
-  if (LADDERS[landed] !== undefined) return { landed, to: LADDERS[landed], via: 'ladder' };
-  if (SNAKES[landed] !== undefined) return { landed, to: SNAKES[landed], via: 'snake' };
-  return { landed, to: landed, via: null };
+  return settle(from + die);
+}
+
+/** Like a roll, but `steps` may be negative: backwards moves stop at square 1. */
+export function resolveMove(from, steps) {
+  if (steps >= 0) return resolveRoll(from, steps);
+  if (from === 0) return { landed: 0, to: 0, via: null };
+  return settle(Math.max(1, from + steps));
+}
+
+/** Pass the turn on from `seat`, skipping (and thawing) anyone frozen. */
+function passTurn(state, seat, effects) {
+  const missed = [];
+  let next = seat;
+  for (let step = 0; step < MAX_PLAYERS; step += 1) {
+    next = nextSeat(state.players, next);
+    if (next !== seat && effects[next].frozen > 0) {
+      effects[next] = { ...effects[next], frozen: effects[next].frozen - 1 };
+      missed.push(next);
+      continue;
+    }
+    break;
+  }
+  return { turn: next, missed };
 }
 
 export function playRoll(state, playerId, die) {
@@ -74,27 +147,38 @@ export function playRoll(state, playerId, die) {
 
   const seat = state.turn;
   const from = state.positions[seat];
-  const move = resolveRoll(from, die);
+  const effects = state.effects.map((effect) => ({ ...effect }));
+  const own = effects[seat];
+  // Double dice and bananas apply to this roll, then wear off.
+  let steps = own.double ? die * 2 : die;
+  if (own.banana) steps = -steps;
+  effects[seat] = { ...own, double: false, banana: false };
+  const move = resolveMove(from, steps);
   const positions = [...state.positions];
   positions[seat] = move.to;
   const won = move.to === LAST_SQUARE;
   const scores = [...state.scores];
   if (won) scores[seat] += 1;
+  // A six earns another roll.
+  const passed = won || die === 6 ? { turn: seat, missed: [] } : passTurn(state, seat, effects);
   return {
     ...state,
     positions,
     scores,
     winner: won ? seat : null,
-    // A six earns another roll.
-    turn: won || die === 6 ? seat : nextSeat(state.players, seat),
-    lastRoll: { seat, die, from, ...move },
+    turn: passed.turn,
+    lastRoll: { seat, die, steps, from, ...move },
     lastSkip: null,
+    lastEvent: 'roll',
+    lastFrozen: passed.missed,
+    effects,
+    powerUsed: false,
     rolls: state.rolls + 1,
     revision: state.revision + 1,
   };
 }
 
-export function nextRound(state) {
+export function nextRound(state, random = Math.random) {
   const round = state.round + 1;
   return {
     ...state,
@@ -103,6 +187,12 @@ export function nextRound(state) {
     winner: null,
     lastRoll: null,
     lastSkip: null,
+    lastEvent: null,
+    lastFrozen: [],
+    hands: deal(state.players, state.mode, random),
+    effects: calmAll(),
+    powerUsed: false,
+    lastPower: null,
     round,
     revision: state.revision + 1,
   };
@@ -111,26 +201,129 @@ export function nextRound(state) {
 /** The player whose turn it is ran out of time: the turn passes to the next seat. */
 export function skipTurn(state) {
   if (state.winner !== null || state.players[state.turn] === null) return state;
-  const next = nextSeat(state.players, state.turn);
-  if (next === state.turn) return state;
+  const effects = state.effects.map((effect) => ({ ...effect }));
+  const passed = passTurn(state, state.turn, effects);
+  if (passed.turn === state.turn) return state;
   return {
     ...state,
-    turn: next,
+    turn: passed.turn,
     lastSkip: state.turn,
+    lastEvent: 'skip',
+    lastFrozen: passed.missed,
+    effects,
+    powerUsed: false,
     skips: state.skips + 1,
+    revision: state.revision + 1,
+  };
+}
+
+/** The mode can change before anyone has moved in a round, or once a round is won. */
+export function canChangeMode(state) {
+  return state.winner !== null || (state.lastRoll === null && state.lastPower === null && state.positions.every((square) => square === 0));
+}
+
+/** Switch between Classic and Chaos, starting the round afresh in the new mode. */
+export function setMode(state, mode, random = Math.random) {
+  if (!GAME_MODES.includes(mode) || mode === state.mode || !canChangeMode(state)) return state;
+  if (state.winner !== null) return nextRound({ ...state, mode }, random);
+  return {
+    ...state,
+    mode,
+    positions: [0, 0, 0, 0],
+    turn: startingSeat(state.round, state.players),
+    lastSkip: null,
+    lastEvent: null,
+    lastFrozen: [],
+    hands: deal(state.players, mode, random),
+    effects: calmAll(),
+    powerUsed: false,
+    lastPower: null,
+    revision: state.revision + 1,
+  };
+}
+
+/**
+ * Play the power-up in `slot` of the current player's hand, aimed at `target` when it
+ * needs one. `random` only matters for Shuffle. Returns the same state if not allowed.
+ */
+export function usePower(state, playerId, slot, target = null, random = Math.random) {
+  const seat = state.turn;
+  if (state.mode !== 'chaos' || state.winner !== null || state.powerUsed || playerId === null || playerId === undefined ||
+      state.players[seat] !== playerId || !Number.isInteger(slot)) return state;
+  const power = state.hands[seat][slot];
+  if (!power) return state;
+  const { aim } = POWER_UPS[power];
+  if (aim === 'other' && (!isSeat(target) || target === seat || state.players[target] === null)) return state;
+
+  const positions = [...state.positions];
+  const effects = state.effects.map((effect) => ({ ...effect }));
+  const moves = [];
+  const blocked = [];
+  const move = (who, to) => {
+    if (positions[who] !== to) moves.push([who, positions[who], to]);
+    positions[who] = to;
+  };
+  // A shield soaks up the hit, and is used up doing it.
+  const shielded = (who) => {
+    if (!effects[who].shield) return false;
+    effects[who] = { ...effects[who], shield: false };
+    blocked.push(who);
+    return true;
+  };
+  const rivals = SEATS.filter((other) => other !== seat && state.players[other] !== null);
+
+  if (power === 'rocket') move(seat, settle(Math.min(positions[seat] + ROCKET_SQUARES, LAST_SQUARE - 1)).to);
+  else if (power === 'double') effects[seat] = { ...effects[seat], double: true };
+  else if (power === 'shield') effects[seat] = { ...effects[seat], shield: true };
+  else if (aim === 'other') {
+    if (!shielded(target)) {
+      if (power === 'bite') move(target, resolveMove(positions[target], -BITE_SQUARES).to);
+      else if (power === 'swap') {
+        const mine = positions[seat];
+        move(seat, positions[target]);
+        move(target, mine);
+      } else if (power === 'freeze') effects[target] = { ...effects[target], frozen: Math.min(MAX_FROZEN, effects[target].frozen + 1) };
+      else if (power === 'banana') effects[target] = { ...effects[target], banana: true };
+    }
+  } else if (power === 'lightning') {
+    for (const rival of rivals) if (!shielded(rival)) move(rival, resolveMove(positions[rival], -LIGHTNING_SQUARES).to);
+  } else if (power === 'shuffle') {
+    const caught = [seat, ...rivals.filter((rival) => !shielded(rival))];
+    const squares = caught.map((who) => positions[who]);
+    for (let i = squares.length - 1; i > 0; i -= 1) {
+      const j = Math.floor(random() * (i + 1)) % (i + 1);
+      [squares[i], squares[j]] = [squares[j], squares[i]];
+    }
+    const before = [...positions];
+    caught.forEach((who, index) => { if (before[who] !== squares[index]) moves.push([who, before[who], squares[index]]); });
+    caught.forEach((who, index) => { positions[who] = squares[index]; });
+  }
+
+  const hands = state.hands.map((hand) => [...hand]);
+  hands[seat].splice(slot, 1);
+  return {
+    ...state,
+    positions,
+    effects,
+    hands,
+    powerUsed: true,
+    powers: state.powers + 1,
+    lastPower: { seat, power, target: aim === 'other' ? target : null, blocked, moves },
+    lastEvent: 'power',
     revision: state.revision + 1,
   };
 }
 
 /**
  * Apply a new seating. Tokens stay with the people who are still seated, a new
- * arrival starts from square zero, and a finished round makes way for a new one.
+ * arrival starts from square zero (with power-ups from the next round), and a
+ * finished round makes way for a new one.
  */
-export function seatPlayers(state, players) {
+export function seatPlayers(state, players, random = Math.random) {
   const seats = seatList(players);
   const changed = SEATS.map((seat) => seats[seat] !== state.players[seat]);
   if (!changed.some(Boolean)) return state;
-  if (state.winner !== null) return nextRound({ ...state, players: seats });
+  if (state.winner !== null) return nextRound({ ...state, players: seats }, random);
   return {
     ...state,
     players: seats,
@@ -138,20 +331,37 @@ export function seatPlayers(state, players) {
     turn: seats[state.turn] === null ? nextSeat(seats, state.turn) : state.turn,
     lastRoll: state.lastRoll && changed[state.lastRoll.seat] ? null : state.lastRoll,
     lastSkip: state.lastSkip !== null && changed[state.lastSkip] ? null : state.lastSkip,
+    lastEvent: (state.lastEvent === 'roll' && state.lastRoll && changed[state.lastRoll.seat]) ||
+      (state.lastEvent === 'skip' && state.lastSkip !== null && changed[state.lastSkip]) ||
+      (state.lastEvent === 'power' && state.lastPower && changed[state.lastPower.seat]) ? null : state.lastEvent,
+    lastFrozen: state.lastFrozen.filter((seat) => !changed[seat]),
+    lastPower: state.lastPower && changed[state.lastPower.seat] ? null : state.lastPower,
+    powerUsed: state.lastPower && changed[state.lastPower.seat] ? false : state.powerUsed,
+    hands: state.hands.map((hand, seat) => (changed[seat] ? [] : hand)),
+    effects: state.effects.map((effect, seat) => (changed[seat] ? calm() : effect)),
     revision: state.revision + 1,
   };
 }
 
+const isEffect = (effect) => effect && typeof effect === 'object' && Object.keys(effect).length === 4 &&
+  Number.isInteger(effect.frozen) && effect.frozen >= 0 && effect.frozen <= MAX_FROZEN &&
+  typeof effect.banana === 'boolean' && typeof effect.double === 'boolean' && typeof effect.shield === 'boolean';
+const ROLL_KEYS = ['seat', 'die', 'steps', 'from', 'landed', 'to', 'via'];
+const isSquare = (value) => Number.isInteger(value) && value >= 0 && value <= LAST_SQUARE;
+
 // Treat network state as untrusted, including internally inconsistent boards.
 export function isValidGame(state, memberIds) {
   if (!state || typeof state !== 'object') return false;
-  const { positions, players, scores, turn, winner, lastRoll, round, revision } = state;
-  if (!BOARD_THEMES.includes(state.theme)) return false;
+  const { positions, players, scores, turn, winner, lastRoll, round, revision, mode, hands, effects, lastPower } = state;
+  if (!BOARD_THEMES.includes(state.theme) || !GAME_MODES.includes(mode)) return false;
   if (!Number.isSafeInteger(state.rolls) || state.rolls < 0 || state.rolls > revision || (lastRoll !== null && state.rolls < 1)) return false;
   if (!Number.isSafeInteger(state.skips) || state.skips < 0 || state.skips > revision) return false;
+  if (!Number.isSafeInteger(state.powers) || state.powers < 0 || state.powers > revision) return false;
   if (state.lastSkip !== null && (!isSeat(state.lastSkip) || state.skips < 1 || winner !== null)) return false;
+  if (![null, 'roll', 'skip', 'power'].includes(state.lastEvent) || typeof state.powerUsed !== 'boolean') return false;
+  if (!Array.isArray(state.lastFrozen) || state.lastFrozen.length > MAX_PLAYERS - 1 || !state.lastFrozen.every(isSeat)) return false;
   if (!Number.isSafeInteger(round) || round < 1 || !Number.isSafeInteger(revision) || revision < 0 || !isSeat(turn)) return false;
-  for (const list of [positions, players, scores]) {
+  for (const list of [positions, players, scores, hands, effects]) {
     if (!Array.isArray(list) || list.length !== MAX_PLAYERS) return false;
   }
 
@@ -168,6 +378,12 @@ export function isValidGame(state, memberIds) {
         LADDERS[position] !== undefined || SNAKES[position] !== undefined) return false;
     if (players[seat] === null && position !== 0) return false;
     if (!Number.isSafeInteger(scores[seat]) || scores[seat] < 0) return false;
+    const hand = hands[seat];
+    if (!Array.isArray(hand) || hand.length > HAND_SIZE || !hand.every((power) => POWER_IDS.includes(power))) return false;
+    if (!isEffect(effects[seat])) return false;
+    // Classic games, and empty seats, carry no power-ups or effects.
+    if ((mode === 'classic' || players[seat] === null) &&
+        (hand.length || effects[seat].frozen || effects[seat].banana || effects[seat].double || effects[seat].shield)) return false;
   }
   if (scores.reduce((sum, score) => sum + score, 0) > round - (winner === null ? 1 : 0)) return false;
 
@@ -175,17 +391,37 @@ export function isValidGame(state, memberIds) {
   if (winner === null) {
     if (finished.length) return false;
   } else if (!isSeat(winner) || finished.length !== 1 || finished[0] !== winner || players[winner] === null ||
-      scores[winner] < 1 || turn !== winner || lastRoll?.seat !== winner) return false;
+      scores[winner] < 1 || turn !== winner || lastRoll?.seat !== winner || state.lastEvent !== 'roll') return false;
 
   if (lastRoll !== null) {
     if (!lastRoll || typeof lastRoll !== 'object' || !isSeat(lastRoll.seat) || players[lastRoll.seat] === null ||
         !Number.isInteger(lastRoll.die) || lastRoll.die < 1 || lastRoll.die > 6 ||
         !Number.isInteger(lastRoll.from) || lastRoll.from < 0 || lastRoll.from >= LAST_SQUARE) return false;
-    const move = resolveRoll(lastRoll.from, lastRoll.die);
-    if (move.landed !== lastRoll.landed || move.to !== lastRoll.to || move.via !== lastRoll.via ||
-        Object.keys(lastRoll).length !== 6 || positions[lastRoll.seat] !== lastRoll.to) return false;
-    // A six rolls again, unless that extra turn then ran out of time.
-    if (lastRoll.die === 6 && turn !== lastRoll.seat && state.lastSkip === null) return false;
+    const keys = Object.keys(lastRoll);
+    if (keys.length !== ROLL_KEYS.length || !ROLL_KEYS.every((key) => keys.includes(key))) return false;
+    // Classic rolls move by the die; Chaos rolls may be doubled or sent backwards.
+    const allowed = mode === 'chaos' ? [lastRoll.die, lastRoll.die * 2, -lastRoll.die, -lastRoll.die * 2] : [lastRoll.die];
+    if (!allowed.includes(lastRoll.steps)) return false;
+    const move = resolveMove(lastRoll.from, lastRoll.steps);
+    if (move.landed !== lastRoll.landed || move.to !== lastRoll.to || move.via !== lastRoll.via) return false;
+    // Straight after a roll, the token is where the roll left it, and a six rolls again.
+    if (state.lastEvent === 'roll') {
+      if (positions[lastRoll.seat] !== lastRoll.to) return false;
+      if (lastRoll.die === 6 && turn !== lastRoll.seat) return false;
+    }
   }
+  if (state.lastEvent === 'roll' && lastRoll === null) return false;
+  if (state.lastEvent === 'skip' && state.lastSkip === null) return false;
+
+  if (lastPower !== null) {
+    if (mode !== 'chaos' || !lastPower || typeof lastPower !== 'object' || Object.keys(lastPower).length !== 5 ||
+        !isSeat(lastPower.seat) || !POWER_IDS.includes(lastPower.power) || state.powers < 1 ||
+        !(lastPower.target === null || isSeat(lastPower.target)) ||
+        !Array.isArray(lastPower.blocked) || lastPower.blocked.length > MAX_PLAYERS || !lastPower.blocked.every(isSeat) ||
+        !Array.isArray(lastPower.moves) || lastPower.moves.length > MAX_PLAYERS ||
+        !lastPower.moves.every((entry) => Array.isArray(entry) && entry.length === 3 && isSeat(entry[0]) && isSquare(entry[1]) && isSquare(entry[2]))) return false;
+  }
+  if (state.lastEvent === 'power' && (lastPower === null || !state.powerUsed)) return false;
+  if (mode === 'classic' && (state.powerUsed || lastPower !== null)) return false;
   return revision >= round - 1 + (lastRoll ? 1 : 0);
 }

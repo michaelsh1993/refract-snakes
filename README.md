@@ -65,6 +65,26 @@ Alternatively, run `npm run build` and serve **only `dist/`** from any static HT
 - The last square needs an exact roll. A roll that would overshoot leaves the token where it is.
 - Seven ladders and eight snakes are fixed in [`src/game.js`](src/game.js); edit `LADDERS` and `SNAKES` to change the board. The drawing follows the data.
 
+## Chaos mode
+
+An optional mode, off by default. Pick **Game mode → Chaos** before anyone moves in a round, or after a round is won. In Refract any seated player can switch it, and everyone plays the same mode.
+
+Every player is dealt **three random power-ups** at the start of each round. On your turn you may play **one**, before you throw.
+
+| Power-up | Aimed at | Effect |
+| --- | --- | --- |
+| 🚀 Rocket | You | Blast 8 squares ahead, then any snake or ladder. Never lands on 100. |
+| 🎲 Double dice | You | Your next roll counts twice. |
+| 🛡️ Shield | You | Blocks the next power-up used on you. |
+| 🐍 Snake bite | A rival | Back 10 squares (a ladder at the bottom still counts). |
+| 🔄 Swap | A rival | Trade places. |
+| 🧊 Freeze | A rival | They miss their next turn. |
+| 🍌 Banana | A rival | Their next roll goes backwards. |
+| ⚡ Lightning | Every rival | Everyone else slides back 6 squares. |
+| 🌀 Shuffle | Everyone | All unshielded players swap squares at random. |
+
+Effects show as badges on each player's card, with how many power-ups they have left. A banner announces each power-up on every screen. Computer opponents play them too, usually on whoever is winning. The coordinator applies every power-up, so a guest cannot choose a Shuffle's result. A player who joins mid-round gets power-ups from the next round.
+
 ## Game behavior
 
 - First participant coordinates the shared state; only that copy accepts rolls and publishes snapshots.

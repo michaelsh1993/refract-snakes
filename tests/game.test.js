@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   BOARD_THEMES, LADDERS, LAST_SQUARE, SNAKES, createGame, isValidGame, nextRound, nextSeat, playRoll,
-  resolveRoll, rollDie, seatPlayers, skipTurn, startingSeat,
+  POWER_UPS, canChangeMode, resolveMove, resolveRoll, rollDie, seatPlayers, setMode, skipTurn, startingSeat, usePower,
 } from '../src/game.js';
 
 const rolls = (state, dice) => dice.reduce((current, die) => playRoll(current, current.players[current.turn], die), state);
@@ -59,7 +59,7 @@ test('rolls move the token, pass the turn, and sixes roll again', () => {
   state = playRoll(state, 10, 3);
   assert.deepEqual(state.positions, [3, 0, 0, 0]);
   assert.equal(state.turn, 1);
-  assert.deepEqual(state.lastRoll, { seat: 0, die: 3, from: 0, landed: 3, to: 3, via: null });
+  assert.deepEqual(state.lastRoll, { seat: 0, die: 3, steps: 3, from: 0, landed: 3, to: 3, via: null });
   state = playRoll(state, 20, 6);
   assert.equal(state.turn, 1);
   state = playRoll(state, 20, 2);
@@ -169,9 +169,125 @@ test('validation rejects malformed and inconsistent states', () => {
     { ...state, lastRoll: { ...state.lastRoll, die: 7 } },
     { ...state, lastRoll: { ...state.lastRoll, seat: 2 } },
     { ...state, lastRoll: { ...state.lastRoll, extra: 'x'.repeat(100) } },
-    { ...state, lastRoll: { seat: 1, die: 6, from: 0, landed: 6, to: 6, via: null }, positions: [3, 6, 0, 0] },
+    { ...state, lastRoll: { seat: 1, die: 6, steps: 6, from: 0, landed: 6, to: 6, via: null }, positions: [3, 6, 0, 0] },
+    { ...state, lastRoll: { ...state.lastRoll, steps: 10 } },
+    { ...state, mode: 'arcade' },
+    { ...state, hands: [['rocket'], [], [], []] },
+    { ...state, powerUsed: true },
     { ...won, winner: null },
     { ...won, lastRoll: null },
     { ...won, scores: [0, 0, 0, 0] },
   ]) assert.equal(isValidGame(bad, [1, 2]), false, JSON.stringify(bad));
+});
+
+// ---------- Chaos mode ----------
+// A predictable stand-in for Math.random: always picks the first power-up and keeps shuffle order.
+const first = () => 0;
+const chaos = (players = [1, 2, 3], hands) => {
+  const state = createGame(players, 'classic', 'chaos', first);
+  return hands ? { ...state, hands } : state;
+};
+const calm = { frozen: 0, banana: false, double: false, shield: false };
+
+test('chaos deals every seated player three power-ups; classic deals none', () => {
+  assert.deepEqual(createGame([1, 2]).hands, [[], [], [], []]);
+  const state = chaos([1, 2, null, 4]);
+  assert.deepEqual(state.hands.map((hand) => hand.length), [3, 3, 0, 3]);
+  assert.ok(state.hands.flat().every((power) => POWER_UPS[power]));
+  assert.ok(isValidGame(state, [1, 2, 4]));
+  assert.deepEqual(nextRound(state, first).hands.map((hand) => hand.length), [3, 3, 0, 3]);
+});
+
+test('one power-up per turn, only by the player whose turn it is, aimed at a real rival', () => {
+  const state = chaos([1, 2, 3], [['bite', 'swap'], ['swap'], [], []]);
+  assert.equal(usePower(state, 2, 0, 0), state);
+  assert.equal(usePower(state, 1, 0, 0), state);
+  assert.equal(usePower(state, 1, 0, 3), state);
+  assert.equal(usePower(state, 1, 5, 1), state);
+  const classic = createGame([1, 2]);
+  assert.equal(usePower(classic, 1, 0, 1), classic);
+  const used = usePower(state, 1, 0, 1);
+  assert.notEqual(used, state);
+  assert.deepEqual(used.hands[0], ['swap']);
+  assert.equal(used.powerUsed, true);
+  assert.equal(usePower(used, 1, 0, 1), used);
+  assert.ok(isValidGame(used, [1, 2, 3]));
+  // The next roll starts a fresh turn, with a fresh chance to play.
+  assert.equal(playRoll(used, 1, 2).powerUsed, false);
+});
+
+test('each power-up does what it says', () => {
+  const at = (positions, hands, effects) => ({ ...chaos([1, 2, 3], hands), positions, ...(effects ? { effects } : {}) });
+  // Rocket: 8 ahead, then any snake or ladder; never onto 100.
+  assert.equal(usePower(at([10, 0, 0, 0], [['rocket'], [], [], []]), 1, 0).positions[0], 18);
+  assert.equal(usePower(at([96, 0, 0, 0], [['rocket'], [], [], []]), 1, 0).positions[0], 41);
+  assert.equal(usePower(at([90, 0, 0, 0], [['rocket'], [], [], []]), 1, 0).positions[0], 98);
+  // Snake bite: back 10, and a ladder at the bottom still counts.
+  assert.equal(usePower(at([0, 35, 0, 0], [['bite'], [], [], []]), 1, 0, 1).positions[1], 25);
+  assert.equal(usePower(at([0, 7, 0, 0], [['bite'], [], [], []]), 1, 0, 1).positions[1], 1);
+  // Swap.
+  assert.deepEqual(usePower(at([10, 30, 0, 0], [['swap'], [], [], []]), 1, 0, 1).positions, [30, 10, 0, 0]);
+  // Lightning: every rival back 6.
+  assert.deepEqual(usePower(at([52, 30, 20, 0], [['lightning'], [], [], []]), 1, 0).positions, [52, 24, 14, 0]);
+  // Shuffle keeps the same squares in play, just moved around.
+  const shuffled = usePower(at([52, 30, 20, 0], [['shuffle'], [], [], []]), 1, 0, null, first);
+  assert.deepEqual([...shuffled.positions].sort((a, b) => a - b), [0, 20, 30, 52]);
+  assert.ok(isValidGame(shuffled, [1, 2, 3]));
+  // Double dice and banana change the next roll, then wear off.
+  const doubled = usePower(at([10, 0, 0, 0], [['double'], [], [], []]), 1, 0);
+  const rolled = playRoll(doubled, 1, 3);
+  assert.deepEqual([rolled.positions[0], rolled.lastRoll.steps, rolled.effects[0].double], [16, 6, false]);
+  assert.ok(isValidGame(rolled, [1, 2, 3]));
+  const peeled = playRoll({ ...at([0, 20, 0, 0], [[], [], [], []], [calm, { ...calm, banana: true }, calm, calm]), turn: 1 }, 2, 3);
+  assert.deepEqual([peeled.positions[1], peeled.lastRoll.steps, peeled.effects[1].banana], [17, -3, false]);
+  assert.ok(isValidGame(peeled, [1, 2, 3]));
+});
+
+test('freeze skips the next turn, and a shield blocks one hit', () => {
+  let state = chaos([1, 2, 3], [['freeze'], ['shield'], [], []]);
+  state = usePower(state, 1, 0, 1);
+  assert.equal(state.effects[1].frozen, 1);
+  state = playRoll(state, 1, 2);
+  assert.deepEqual([state.turn, state.lastFrozen, state.effects[1].frozen], [2, [1], 0]);
+  assert.ok(isValidGame(state, [1, 2, 3]));
+
+  let shielded = { ...chaos([1, 2], [['bite', 'swap'], ['shield'], [], []]), positions: [10, 30, 0, 0] };
+  shielded = playRoll(shielded, 1, 2);
+  shielded = usePower(shielded, 2, 0);
+  assert.equal(shielded.effects[1].shield, true);
+  shielded = playRoll(shielded, 2, 1);
+  const bitten = usePower(shielded, 1, 0, 1);
+  assert.deepEqual([bitten.positions[1], bitten.effects[1].shield, bitten.lastPower.blocked], [31, false, [1]]);
+});
+
+test('the mode switches only before anyone moves or after a win, and restarts the round', () => {
+  const classic = createGame([1, 2]);
+  assert.ok(canChangeMode(classic));
+  const chaotic = setMode(classic, 'chaos', first);
+  assert.equal(chaotic.mode, 'chaos');
+  assert.deepEqual(chaotic.hands.map((hand) => hand.length), [3, 3, 0, 0]);
+  const moved = playRoll(chaotic, 1, 2);
+  assert.equal(canChangeMode(moved), false);
+  assert.equal(setMode(moved, 'classic'), moved);
+  const won = playRoll({ ...chaotic, positions: [94, 0, 0, 0] }, 1, 6);
+  const back = setMode(won, 'classic');
+  assert.deepEqual([back.mode, back.round, back.winner, back.hands.flat().length], ['classic', 2, null, 0]);
+  assert.ok(isValidGame(back, [1, 2]));
+  assert.deepEqual(resolveMove(0, -5), { landed: 0, to: 0, via: null });
+});
+
+test('every reachable chaos state validates', () => {
+  let seed = 5;
+  const random = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
+  let state = createGame([1, 2, 3], 'jungle', 'chaos', random);
+  for (let i = 0; i < 6000; i += 1) {
+    assert.ok(isValidGame(state, [1, 2, 3]), JSON.stringify(state));
+    if (state.winner !== null) state = nextRound(state, random);
+    else if (!state.powerUsed && state.hands[state.turn].length && random() < 0.5) {
+      const others = [0, 1, 2].filter((seat) => seat !== state.turn);
+      state = usePower(state, state.players[state.turn], 0, others[Math.floor(random() * 2)], random);
+    } else if (random() < 0.05) state = skipTurn(state);
+    else state = playRoll(state, state.players[state.turn], Math.floor(random() * 6) + 1);
+  }
+  assert.ok(state.powers > 50);
 });

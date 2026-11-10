@@ -85,6 +85,8 @@ function network(initialIds = [1, 2], { persistence = true, dice = [] } = {}) {
       clock = until;
     },
     timers: () => timers.length,
+    power(id, slot, target) { clients.get(id).session.usePower(slot, target); flush(); },
+    mode(id, mode) { clock += 1500; clients.get(id).session.setMode(mode); flush(); },
     theme(id, theme, { wait = true } = {}) {
       if (wait) clock += 1500;
       clients.get(id).session.setTheme(theme);
@@ -408,6 +410,38 @@ test('only the host keeps time, the clock stops between rounds, and a new host t
   const turn = net.state().turn;
   net.advance(TURN_MS + TURN_GRACE_MS);
   assert.notEqual(net.state().turn, turn);
+  net.assertConverged();
+});
+
+test('chaos mode: any player switches it on before moving, hands are dealt, and power-ups sync', () => {
+  const net = network([1, 2, 3, 4, 5], { dice: [3, 2] });
+  net.mode(5, 'chaos');
+  assert.equal(net.state().mode, 'classic');
+  net.mode(2, 'chaos');
+  assert.equal(net.state().mode, 'chaos');
+  assert.deepEqual(net.state().hands.map((hand) => hand.length), [3, 3, 3, 3]);
+  net.assertConverged();
+  // Only the player whose turn it is can play, once per turn.
+  net.power(2, 0, 0);
+  assert.equal(net.state().powers, 0);
+  const hand = net.state().hands[0].length;
+  const power = net.state().hands[0][0];
+  const target = ['bite', 'swap', 'freeze', 'banana'].includes(power) ? 1 : null;
+  net.power(1, 0, target);
+  assert.equal(net.state().powers, 1);
+  assert.equal(net.state().hands[0].length, hand - 1);
+  net.power(1, 0, target);
+  assert.equal(net.state().powers, 1);
+  net.assertConverged();
+  // Once anyone has moved, the mode stays put until the round is won.
+  net.roll(1);
+  net.mode(2, 'classic');
+  assert.equal(net.state().mode, 'chaos');
+  // A replayed power-up request is refused.
+  const stale = { ...net.packet('power', { slot: 0, target: 0, powers: 0 }) };
+  net.clients.get(1).session.receive(2, stale);
+  net.flush();
+  assert.equal(net.state().powers, 1);
   net.assertConverged();
 });
 
