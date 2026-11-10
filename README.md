@@ -57,7 +57,8 @@ Alternatively, run `npm run build` and serve **only `dist/`** from any static HT
 
 - Everyone starts off the board. Roll the die and move that many squares; first to square 100 wins the round.
 - Landing on the foot of a ladder climbs to its top. Landing on a snake’s head slides down to its tail.
-- Click **Roll the dice** to pick the die up, move the pointer to shake it, and click again to throw. It bounces off the edges of the screen before it lands. The shake is for show: every roll is an independent fair throw. Escape puts the die back; with reduced motion one click rolls straight away.
+- Click **Roll the dice** and the die appears in the middle of the screen. Grab it and fling it, or click anywhere else to toss it; it bounces off the edges of the screen before it lands. The throw is for show: every roll is an independent fair throw. Escape puts the die back; with reduced motion one click rolls straight away.
+- **Calm effects** is a per-viewer switch that stops flashing, twinkling, falling snow and the die's flickering faces. It is remembered in that browser and never shared.
 - A six earns another roll.
 - The last square needs an exact roll. A roll that would overshoot leaves the token where it is.
 - Seven ladders and eight snakes are fixed in [`src/game.js`](src/game.js); edit `LADDERS` and `SNAKES` to change the board. The drawing follows the data.

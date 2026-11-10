@@ -16,6 +16,15 @@ function savedBoardTheme() {
 function saveBoardTheme(theme) {
   try { localStorage.setItem(THEME_KEY, theme); } catch { /* The choice simply is not remembered. */ }
 }
+// Calm effects: a per-viewer switch that stops flashing, twinkling, and flickering.
+const CALM_KEY = 'refract-snakes-and-ladders:calm-effects';
+let calmEffects = false;
+try { calmEffects = localStorage.getItem(CALM_KEY) === 'on'; } catch { /* Defaults to off. */ }
+function showCalm() {
+  document.documentElement.dataset.calm = calmEffects ? 'on' : 'off';
+  document.getElementById('calm-toggle')?.setAttribute('aria-checked', String(calmEffects));
+}
+showCalm();
 let mode = 'computer';
 let playerCount = 2;
 let localState = createGame(localPlayers(), savedBoardTheme());
@@ -38,9 +47,11 @@ let throwTimer = null;
 let frame = null;
 let tossed = false;
 let rollSeat = null;
-// The big die is a small physics body: 'held' on a spring to the pointer, 'flying' free
-// across the screen, 'rest' once it has landed, and 'away' when it is not shown.
-const die = { mode: 'away', x: 0, y: 0, vx: 0, vy: 0, angle: 0, spin: 0, px: 0, py: 0, travelled: 0, value: null, started: 0, last: 0, tap: null };
+// The big die is a small physics body: 'ready' waiting in the middle of the screen,
+// 'held' on a spring under the pointer, 'flying' free across the screen, 'rest' once
+// it has landed, and 'away' when it is not shown.
+const die = { mode: 'away', x: 0, y: 0, vx: 0, vy: 0, angle: 0, spin: 0, px: 0, py: 0, grabX: 0, grabY: 0, pointer: null, travelled: 0, value: null, started: 0, last: 0 };
+const inHand = () => die.mode === 'ready' || die.mode === 'held';
 const overlay = $('throw');
 const bigDie = $('big-die');
 
@@ -263,6 +274,8 @@ function drawDie() {
 }
 
 function rattle() {
+  // A die rapidly changing faces flickers; calm effects keep one face until it lands.
+  if (calmEffects) return;
   bigDie.dataset.value = String((Number(bigDie.dataset.value) + Math.floor(Math.random() * 5)) % 6 + 1);
 }
 
@@ -279,7 +292,7 @@ function putAway() {
   cancelAnimationFrame(frame);
   frame = null;
   clearTimeout(throwTimer);
-  overlay.classList.remove('show', 'held', 'landed');
+  overlay.classList.remove('show', 'held', 'ready', 'grabbing', 'landed');
   document.body.classList.remove('throwing');
 }
 
@@ -301,10 +314,10 @@ function landDie() {
 /** Advance the die by `dt` seconds. Returns true when it hit an edge of the screen. */
 function stepDie(dt, held) {
   if (held) {
-    // A slightly springy grip: the die chases the pointer and swings past it.
-    die.vx += ((die.px - die.x) * 150 - die.vx * 13) * dt;
-    die.vy += ((die.py - die.y) * 150 - die.vy * 13) * dt;
-    die.spin += (die.vx * 1.4 - die.spin * 4) * dt;
+    // A firm, slightly springy grip: the die follows the hand that holds it.
+    die.vx += ((die.px - die.x) * 520 - die.vx * 40) * dt;
+    die.vy += ((die.py - die.y) * 520 - die.vy * 40) * dt;
+    die.spin += (die.vx * 0.9 - die.spin * 6) * dt;
   } else {
     // Glide freely at first so the die reaches the edges, then let the table grip it.
     const drag = Math.exp(-(performance.now() - die.started < 1000 ? 0.9 : 4.5) * dt);
@@ -352,7 +365,7 @@ function tick(now) {
     remaining -= dt;
     if (stepDie(dt, held)) bounced = true;
   }
-  if (bounced && Math.hypot(die.vx, die.vy) > 250) {
+  if (bounced && !calmEffects && Math.hypot(die.vx, die.vy) > 250) {
     overlay.classList.remove('bump');
     void overlay.offsetWidth;
     overlay.classList.add('bump');
@@ -393,7 +406,7 @@ function throwDie(value, seat) {
     return;
   }
   showDie(seat);
-  overlay.classList.remove('held');
+  overlay.classList.remove('held', 'ready', 'grabbing');
   die.value = value;
   if (still()) {
     die.x = window.innerWidth / 2;
@@ -425,35 +438,54 @@ function requestRoll() {
   else if (mode === 'local' || localState.turn === 0) localRoll();
 }
 
-/** First click: the die comes to hand and follows the pointer. */
-function pickUp(x, y) {
+/** The roll button puts the die in the middle of the screen, ready to be thrown. */
+function setOut() {
   showDie(rollSeat);
-  overlay.classList.add('held');
+  overlay.classList.add('held', 'ready');
+  // Any face will do until it is thrown.
+  bigDie.dataset.value = String(Math.floor(Math.random() * 6) + 1);
   Object.assign(die, {
-    mode: 'held', value: null, vx: 0, vy: 0, spin: 0, angle: 0, travelled: 0, tap: null,
+    mode: 'ready', value: null, vx: 0, vy: 0, spin: 0, angle: 0, travelled: 0, pointer: null,
     x: window.innerWidth / 2, y: window.innerHeight / 2,
   });
-  die.px = x ?? die.x;
-  die.py = y ?? die.y;
   drawDie();
+}
+
+/** Pressing on the die picks it up where it was touched. */
+function grab(event) {
+  die.mode = 'held';
+  die.pointer = event.pointerId;
+  die.grabX = event.clientX - die.x;
+  die.grabY = event.clientY - die.y;
+  die.px = die.x;
+  die.py = die.y;
+  overlay.classList.remove('ready');
+  overlay.classList.add('grabbing');
+  try { overlay.setPointerCapture(event.pointerId); } catch { /* The drag still works without capture. */ }
   startLoop();
 }
 
-/** Second click: the die leaves the hand with the speed it was shaken at, or a firm flick if it was still. */
+/**
+ * Letting go throws the die at the speed and in the direction it was moving.
+ * A die that was barely moved, or never picked up, gets a gentle toss instead.
+ */
 function release() {
-  if (die.mode !== 'held') return;
-  overlay.classList.remove('held');
+  if (!inHand()) return;
+  overlay.classList.remove('held', 'ready', 'grabbing');
   const current = Math.hypot(die.vx, die.vy);
-  const heading = current > 120 ? Math.atan2(die.vy, die.vx) : Math.random() * Math.PI * 2;
-  const speed = Math.min(Math.max(current * 1.3, launchSpeed()), launchSpeed() * 2);
+  const gentle = current < 260;
+  const heading = current > 40 ? Math.atan2(die.vy, die.vx) : Math.random() * Math.PI * 2;
+  const speed = gentle ? launchSpeed() * 0.6 : Math.min(Math.max(current * 1.25, launchSpeed() * 0.6), launchSpeed() * 2);
   die.vx = Math.cos(heading) * speed;
   die.vy = Math.sin(heading) * speed;
+  die.pointer = null;
   die.spin += (Math.random() < 0.5 ? -1 : 1) * (500 + Math.random() * 500);
   die.mode = 'flying';
   die.value = null;
   die.started = performance.now();
   tossed = true;
-  // The shake is for show: the roll itself stays a fair, independent throw.
+  startLoop();
+  // The throw is for show: the roll itself stays a fair, independent throw.
   requestRoll();
 }
 
@@ -554,7 +586,7 @@ function render() {
   } else {
     status = canRoll && (embedded || mode === 'computer') ? 'Your roll' : `${nameFor(state.turn, state)}’s roll`;
     if (state.lastRoll) detail = describeRoll(state, mine);
-    else detail = canRoll ? 'Click roll to pick up the die, shake it, and click again to throw.' : mine !== null ? 'Good things come to those who wait.' : 'You’ve got the best seat to watch.';
+    else detail = canRoll ? 'Click roll, then grab the die and fling it.' : mine !== null ? 'Good things come to those who wait.' : 'You’ve got the best seat to watch.';
     statusSeat = state.turn;
   }
   if (status !== lastStatus) { $('status').textContent = status; lastStatus = status; }
@@ -577,7 +609,7 @@ function render() {
   die.setAttribute('aria-label', value ? `Last roll: ${value}` : 'No roll yet');
   $('roll').disabled = !canRoll;
   rollSeat = canRoll ? state.turn : null;
-  if (die.mode === 'held' && !canRoll) putAway();
+  if (inHand() && !canRoll) putAway();
 
   syncTokens(state, embedded ? 'live' : `${mode}-${playerCount}`);
   const places = SEATS.filter((seat) => state.players[seat] !== null)
@@ -643,10 +675,16 @@ const session = createSession({
   onChange(view) { liveView = view; render(); },
 });
 
+$('calm-toggle').addEventListener('click', () => {
+  calmEffects = !calmEffects;
+  try { localStorage.setItem(CALM_KEY, calmEffects ? 'on' : 'off'); } catch { /* The choice simply is not remembered. */ }
+  showCalm();
+});
+
 const rollButton = $('roll');
-rollButton.addEventListener('click', (event) => {
-  if (die.mode === 'held') {
-    // Keyboard: the same key that picked the die up throws it.
+rollButton.addEventListener('click', () => {
+  if (inHand()) {
+    // Keyboard: the same key that set the die out tosses it.
     release();
     return;
   }
@@ -655,35 +693,33 @@ rollButton.addEventListener('click', (event) => {
     requestRoll();
     return;
   }
-  const keyboard = event.detail === 0;
-  pickUp(keyboard ? undefined : event.clientX, keyboard ? undefined : event.clientY);
+  setOut();
 });
 
-window.addEventListener('pointermove', (event) => {
-  if (die.mode !== 'held') return;
-  die.px = event.clientX;
-  die.py = event.clientY;
-});
-
-// While the die is in hand the overlay takes every press, wherever the pointer has wandered.
+// While the die is out, the overlay takes every press: on the die picks it up,
+// anywhere else tosses it.
 overlay.addEventListener('pointerdown', (event) => {
-  if (die.mode !== 'held' || event.button !== 0) return;
+  if (die.mode !== 'ready' || event.button !== 0) return;
   event.preventDefault();
-  die.px = event.clientX;
-  die.py = event.clientY;
-  // A mouse click throws at once. A finger may drag to shake, so only a tap throws.
-  if (event.pointerType === 'mouse') release();
-  else die.tap = { id: event.pointerId, x: event.clientX, y: event.clientY };
+  const reach = bigDie.offsetWidth * 0.62;
+  if (Math.hypot(event.clientX - die.x, event.clientY - die.y) <= reach) grab(event);
+  else release();
 });
 
-overlay.addEventListener('pointerup', (event) => {
-  const tap = die.tap;
-  die.tap = null;
-  if (die.mode === 'held' && tap && tap.id === event.pointerId && Math.hypot(event.clientX - tap.x, event.clientY - tap.y) < 14) release();
+overlay.addEventListener('pointermove', (event) => {
+  if (die.mode !== 'held' || event.pointerId !== die.pointer) return;
+  die.px = event.clientX - die.grabX;
+  die.py = event.clientY - die.grabY;
 });
+
+for (const type of ['pointerup', 'pointercancel']) {
+  overlay.addEventListener(type, (event) => {
+    if (die.mode === 'held' && event.pointerId === die.pointer) release();
+  });
+}
 
 window.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && die.mode === 'held') putAway();
+  if (event.key === 'Escape' && inHand()) putAway();
 });
 
 $('next-round').addEventListener('click', () => {
