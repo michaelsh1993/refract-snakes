@@ -1,4 +1,4 @@
-import { BOARD_THEMES, MAX_PLAYERS, createGame, isValidGame, nextRound, playRoll, rollDie as fairDie, seatPlayers } from './game.js';
+import { BOARD_THEMES, MAX_PLAYERS, createGame, isValidGame, nextRound, playRoll, rollDie as fairDie, seatPlayers, skipTurn } from './game.js';
 
 export const GAME_PROTOCOL = 'refract-snakes-and-ladders/1';
 
@@ -31,7 +31,23 @@ function browserStorage() {
 // relay (Refract allows about 20 messages a second) and drown out the rolls.
 export const THEME_COOLDOWN_MS = 1000;
 
-export function createSession({ send, onChange, storage = browserStorage(), rollDie = fairDie, theme: preferredTheme = 'classic', now = () => Date.now() }) {
+// Each player has TURN_MS to throw. After a roll the clock waits TURN_SETTLE_MS for the
+// previous throw to land, and the host allows TURN_GRACE_MS for a throw already on its way.
+export const TURN_MS = 15000;
+export const TURN_SETTLE_MS = 3000;
+export const TURN_GRACE_MS = 1500;
+
+// A pending turn clock must never keep a Node process (such as the test runner) alive.
+function defaultTimer(run, ms) {
+  const timer = setTimeout(run, ms);
+  timer?.unref?.();
+  return timer;
+}
+
+export function createSession({
+  send, onChange, storage = browserStorage(), rollDie = fairDie, theme: preferredTheme = 'classic',
+  now = () => Date.now(), setTimer = defaultTimer, clearTimer = (timer) => clearTimeout(timer),
+}) {
   // A new game starts on this viewer's preferred board; the host's copy wins once connected.
   let state = createGame([], preferredTheme);
   let self = null;
@@ -45,6 +61,9 @@ export function createSession({ send, onChange, storage = browserStorage(), roll
   let acceptedHostId = null;
   let pendingSync = null;
   let lastThemeAt = -Infinity;
+  let turnTimer = null;
+  let turnKey = null;
+  let timedRolls = null;
 
   const ids = () => participants.map((person) => person.id);
   const isHost = () => self !== null && self.id === hostId;
@@ -87,8 +106,33 @@ export function createSession({ send, onChange, storage = browserStorage(), roll
     } catch { /* Ignore invalid or unavailable saved state. */ }
   }
 
+  // Only the host keeps time. A new turn (a roll, a skip, a new round, or a new player in
+  // the seat) restarts the clock; theme changes do not.
+  function armTurnTimer() {
+    const active = !destroyed && connected && isHost() && enoughPlayers() && state.winner === null && state.players[state.turn] !== null;
+    const key = active ? JSON.stringify([state.round, state.rolls, state.skips, state.turn, state.players]) : null;
+    if (key === turnKey) return;
+    if (turnTimer !== null) clearTimer(turnTimer);
+    turnTimer = null;
+    const afterRoll = timedRolls !== null && state.rolls !== timedRolls;
+    turnKey = key;
+    timedRolls = state.rolls;
+    if (!active) return;
+    turnTimer = setTimer(() => {
+      turnTimer = null;
+      if (destroyed || !isHost() || turnKey !== key) return;
+      const next = skipTurn(state);
+      if (next === state) return;
+      state = next;
+      notice = '';
+      emit();
+      snapshot();
+    }, (afterRoll ? TURN_SETTLE_MS : 0) + TURN_MS + TURN_GRACE_MS);
+  }
+
   function emit() {
     if (destroyed) return;
+    armTurnTimer();
     persist();
     onChange({
       state: clone(state), self: self && { ...self },
@@ -294,6 +338,10 @@ export function createSession({ send, onChange, storage = browserStorage(), roll
     roll: () => action('roll'),
     rematch: () => action('rematch'),
     sync,
-    destroy() { destroyed = true; },
+    destroy() {
+      destroyed = true;
+      if (turnTimer !== null) clearTimer(turnTimer);
+      turnTimer = null;
+    },
   };
 }

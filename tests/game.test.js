@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   BOARD_THEMES, LADDERS, LAST_SQUARE, SNAKES, createGame, isValidGame, nextRound, nextSeat, playRoll,
-  resolveRoll, rollDie, seatPlayers, startingSeat,
+  resolveRoll, rollDie, seatPlayers, skipTurn, startingSeat,
 } from '../src/game.js';
 
 const rolls = (state, dice) => dice.reduce((current, die) => playRoll(current, current.players[current.turn], die), state);
@@ -24,6 +24,26 @@ test('the board theme defaults to classic, rejects unknown names, and survives p
     state = nextRound(seatPlayers(playRoll({ ...state, positions: [94, 0, 0, 0] }, 1, 6), [1, 3]));
     assert.equal(state.theme, theme);
     assert.ok(isValidGame(state, [1, 3]));
+  }
+});
+
+test('a turn that runs out passes on, even after a six, and the next roll clears the note', () => {
+  let state = createGame([1, 2, 3]);
+  state = skipTurn(state);
+  assert.deepEqual([state.turn, state.lastSkip, state.skips], [1, 0, 1]);
+  assert.ok(isValidGame(state, [1, 2, 3]));
+  state = playRoll(state, 2, 6);
+  assert.deepEqual([state.turn, state.lastSkip], [1, null]);
+  state = skipTurn(state);
+  assert.deepEqual([state.turn, state.lastSkip], [2, 1]);
+  assert.ok(isValidGame(state, [1, 2, 3]));
+  const alone = createGame([1, null]);
+  assert.equal(skipTurn(alone), alone);
+  const won = playRoll({ ...createGame(), positions: [94, 0, 0, 0] }, 1, 6);
+  assert.equal(skipTurn(won), won);
+  assert.equal(nextRound(state).lastSkip, null);
+  for (const bad of [{ ...state, skips: -1 }, { ...state, skips: 99 }, { ...state, lastSkip: 7 }, { ...state, lastSkip: 0, skips: 0 }]) {
+    assert.equal(isValidGame(bad, [1, 2, 3]), false);
   }
 });
 

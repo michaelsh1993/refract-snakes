@@ -1,5 +1,5 @@
-import { BOARD_THEMES, LADDERS, LAST_SQUARE, SEATS, SNAKES, boardTheme, createGame, nextRound, playRoll, rollDie } from './game.js';
-import { THEME_COOLDOWN_MS, createSession } from './session.js';
+import { BOARD_THEMES, LADDERS, LAST_SQUARE, SEATS, SNAKES, boardTheme, createGame, skipTurn, nextRound, playRoll, rollDie } from './game.js';
+import { THEME_COOLDOWN_MS, TURN_MS, TURN_SETTLE_MS, createSession } from './session.js';
 import { connectActivity } from './bridge.js';
 
 const $ = (id) => document.getElementById(id);
@@ -25,6 +25,46 @@ function showCalm() {
   document.getElementById('calm-toggle')?.setAttribute('aria-checked', String(calmEffects));
 }
 showCalm();
+
+// Turn sounds: a per-viewer switch for the countdown beeps.
+const SOUND_KEY = 'refract-snakes-and-ladders:turn-sounds';
+let turnSounds = true;
+try { turnSounds = localStorage.getItem(SOUND_KEY) !== 'off'; } catch { /* Defaults to on. */ }
+function showSounds() {
+  document.getElementById('sound-toggle')?.setAttribute('aria-checked', String(turnSounds));
+}
+showSounds();
+
+// Browsers only let a page make sound after the person has interacted with it.
+let audio = null;
+function unlockAudio() {
+  try {
+    audio ??= new (window.AudioContext || window.webkitAudioContext)();
+    if (audio.state === 'suspended') void audio.resume();
+  } catch { audio = null; }
+}
+for (const type of ['pointerdown', 'keydown']) window.addEventListener(type, unlockAudio, { capture: true });
+
+function tone(frequency, seconds, { type = 'sine', volume = 0.18, at = 0 } = {}) {
+  if (!turnSounds || !audio || audio.state !== 'running') return;
+  try {
+    const start = audio.currentTime + at;
+    const oscillator = audio.createOscillator();
+    const gain = audio.createGain();
+    oscillator.type = type;
+    oscillator.frequency.value = frequency;
+    gain.gain.setValueAtTime(0.0001, start);
+    gain.gain.exponentialRampToValueAtTime(volume, start + 0.012);
+    gain.gain.exponentialRampToValueAtTime(0.0001, start + seconds);
+    oscillator.connect(gain).connect(audio.destination);
+    oscillator.start(start);
+    oscillator.stop(start + seconds + 0.03);
+  } catch { /* Sound is a nicety. */ }
+}
+// A tick for each of the last five seconds, rising in pitch, then a low buzz when time is up.
+const warningTick = (secondsLeft) => tone(660 + (5 - secondsLeft) * 90, 0.13, { volume: 0.2 });
+const timeUp = () => { tone(330, 0.16, { type: 'triangle', volume: 0.22 }); tone(220, 0.34, { type: 'triangle', volume: 0.22, at: 0.17 }); };
+
 let mode = 'computer';
 let playerCount = 2;
 let localState = createGame(localPlayers(), savedBoardTheme());
@@ -573,7 +613,8 @@ function render() {
   const enough = state.players.filter((id) => id !== null).length >= 2;
   const mine = mySeat(state);
   const playing = ready && enough && state.winner === null;
-  const canRoll = playing && mine === state.turn;
+  const clock = turnClock(state, playing);
+  const canRoll = playing && mine === state.turn && !clock.expired;
   const selfId = liveView?.self?.id;
   showBoardTheme(state.theme, ready);
   $('theme-scope').textContent = embedded ? 'EVERYONE SEES IT' : '';
@@ -610,7 +651,10 @@ function render() {
     statusSeat = state.winner;
   } else {
     status = canRoll && (embedded || mode === 'computer') ? 'Your roll' : `${nameFor(state.turn, state)}’s roll`;
-    if (state.lastRoll) detail = describeRoll(state, mine);
+    if (state.lastSkip !== null) {
+      const you = state.lastSkip === mine && (embedded || mode === 'computer');
+      detail = `${you ? 'You' : nameFor(state.lastSkip, state)} ran out of time.`;
+    } else if (state.lastRoll) detail = describeRoll(state, mine);
     else detail = canRoll ? (manualRoll() ? 'Roll when you’re ready.' : 'Grab the die and fling it.') : mine !== null ? 'Good things come to those who wait.' : 'You’ve got the best seat to watch.';
     statusSeat = state.turn;
   }
@@ -672,6 +716,72 @@ function render() {
   }
 }
 
+// ---------- Turn countdown ----------
+// Every browser times the turn from when it saw it start. The host's clock is the one
+// that counts; this one shows the countdown, beeps, and stops a throw at zero.
+let clockKey = null;
+let clockStart = 0;
+let clockSettle = 0;
+let clockRolls = null;
+let beeped = null;
+
+function timedTurn(state, playing) {
+  if (!playing || state.players[state.turn] === null) return false;
+  // Computer opponents take their own time.
+  return embedded || mode === 'local' || state.turn === 0;
+}
+
+function turnClock(state, playing) {
+  const timed = timedTurn(state, playing);
+  const key = timed ? `${embedded ? 'live' : `${mode}-${playerCount}`}:${JSON.stringify([state.round, state.rolls, state.skips, state.turn, state.players])}` : null;
+  if (key !== clockKey) {
+    clockSettle = clockRolls !== null && state.rolls !== clockRolls ? TURN_SETTLE_MS : 0;
+    clockKey = key;
+    clockStart = performance.now();
+    beeped = null;
+  }
+  clockRolls = state.rolls;
+  if (!timed) return { timed: false, remaining: TURN_MS, expired: false };
+  const remaining = Math.max(0, TURN_MS - Math.max(0, performance.now() - clockStart - clockSettle));
+  return { timed: true, remaining, expired: remaining <= 0 };
+}
+
+function updateClock() {
+  const state = embedded ? liveView?.state ?? createGame([]) : localState;
+  const ready = !embedded || !!liveView?.connected;
+  const enough = state.players.filter((id) => id !== null).length >= 2;
+  const playing = ready && enough && state.winner === null;
+  const clock = turnClock(state, playing);
+  const mine = mySeat(state);
+  const myTurn = clock.timed && mine === state.turn;
+  const seconds = Math.ceil(clock.remaining / 1000);
+  const element = $('countdown');
+  element.hidden = !clock.timed;
+  element.dataset.seat = String(state.turn);
+  element.classList.toggle('urgent', clock.timed && seconds <= 5);
+  $('countdown-seconds').textContent = String(seconds);
+  $('countdown-bar').style.width = `${(clock.remaining / TURN_MS) * 100}%`;
+  $('throw-hint').textContent = myTurn && seconds <= 5 ? `${seconds}… throw it!` : 'Your roll. Grab the die and fling it.';
+  // Only the person whose turn is ending hears it.
+  if (myTurn && beeped !== seconds && seconds <= 5) {
+    if (seconds > 0) warningTick(seconds);
+    else timeUp();
+  }
+  if (clock.timed) beeped = seconds;
+  if (clock.expired) {
+    if (inHand()) putAway();
+    // Locally this browser is the referee; in Refract the host passes the turn.
+    if (!embedded && state.winner === null) {
+      localState = skipTurn(localState);
+      render();
+      scheduleComputer();
+      return;
+    }
+    $('roll').disabled = true;
+  }
+}
+const clockTimer = setInterval(updateClock, 200);
+
 function localRoll() {
   localState = playRoll(localState, localState.players[localState.turn], rollDie());
   render();
@@ -702,6 +812,13 @@ const session = createSession({
   theme: savedBoardTheme(),
   send: (data, to) => bridge?.broadcast(data, to),
   onChange(view) { liveView = view; render(); },
+});
+
+$('sound-toggle').addEventListener('click', () => {
+  turnSounds = !turnSounds;
+  try { localStorage.setItem(SOUND_KEY, turnSounds ? 'on' : 'off'); } catch { /* The choice simply is not remembered. */ }
+  showSounds();
+  if (turnSounds) { unlockAudio(); tone(880, 0.12); }
 });
 
 $('calm-toggle').addEventListener('click', () => {
@@ -803,6 +920,7 @@ if (embedded) {
 }
 
 window.addEventListener('pagehide', () => {
+  clearInterval(clockTimer);
   clearTimeout(computerTimer);
   clearTimeout(handshakeTimer);
   clearTimeout(stepTimer);

@@ -52,6 +52,9 @@ export function createGame(players = [1, 2], theme = 'classic') {
     // Every roll ever thrown in this game. A roll is identified by this count, not by
     // the revision, which also moves for theme and seat changes.
     rolls: 0,
+    // Turns that ran out of time, and the seat that last ran out (cleared by the next roll).
+    skips: 0,
+    lastSkip: null,
     revision: 0,
   };
 }
@@ -85,6 +88,7 @@ export function playRoll(state, playerId, die) {
     // A six earns another roll.
     turn: won || die === 6 ? seat : nextSeat(state.players, seat),
     lastRoll: { seat, die, from, ...move },
+    lastSkip: null,
     rolls: state.rolls + 1,
     revision: state.revision + 1,
   };
@@ -98,7 +102,22 @@ export function nextRound(state) {
     turn: startingSeat(round, state.players),
     winner: null,
     lastRoll: null,
+    lastSkip: null,
     round,
+    revision: state.revision + 1,
+  };
+}
+
+/** The player whose turn it is ran out of time: the turn passes to the next seat. */
+export function skipTurn(state) {
+  if (state.winner !== null || state.players[state.turn] === null) return state;
+  const next = nextSeat(state.players, state.turn);
+  if (next === state.turn) return state;
+  return {
+    ...state,
+    turn: next,
+    lastSkip: state.turn,
+    skips: state.skips + 1,
     revision: state.revision + 1,
   };
 }
@@ -118,6 +137,7 @@ export function seatPlayers(state, players) {
     positions: state.positions.map((position, seat) => (changed[seat] ? 0 : position)),
     turn: seats[state.turn] === null ? nextSeat(seats, state.turn) : state.turn,
     lastRoll: state.lastRoll && changed[state.lastRoll.seat] ? null : state.lastRoll,
+    lastSkip: state.lastSkip !== null && changed[state.lastSkip] ? null : state.lastSkip,
     revision: state.revision + 1,
   };
 }
@@ -128,6 +148,8 @@ export function isValidGame(state, memberIds) {
   const { positions, players, scores, turn, winner, lastRoll, round, revision } = state;
   if (!BOARD_THEMES.includes(state.theme)) return false;
   if (!Number.isSafeInteger(state.rolls) || state.rolls < 0 || state.rolls > revision || (lastRoll !== null && state.rolls < 1)) return false;
+  if (!Number.isSafeInteger(state.skips) || state.skips < 0 || state.skips > revision) return false;
+  if (state.lastSkip !== null && (!isSeat(state.lastSkip) || state.skips < 1 || winner !== null)) return false;
   if (!Number.isSafeInteger(round) || round < 1 || !Number.isSafeInteger(revision) || revision < 0 || !isSeat(turn)) return false;
   for (const list of [positions, players, scores]) {
     if (!Array.isArray(list) || list.length !== MAX_PLAYERS) return false;
@@ -162,7 +184,8 @@ export function isValidGame(state, memberIds) {
     const move = resolveRoll(lastRoll.from, lastRoll.die);
     if (move.landed !== lastRoll.landed || move.to !== lastRoll.to || move.via !== lastRoll.via ||
         Object.keys(lastRoll).length !== 6 || positions[lastRoll.seat] !== lastRoll.to) return false;
-    if (lastRoll.die === 6 && turn !== lastRoll.seat) return false;
+    // A six rolls again, unless that extra turn then ran out of time.
+    if (lastRoll.die === 6 && turn !== lastRoll.seat && state.lastSkip === null) return false;
   }
   return revision >= round - 1 + (lastRoll ? 1 : 0);
 }

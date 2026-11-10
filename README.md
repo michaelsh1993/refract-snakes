@@ -59,6 +59,8 @@ Alternatively, run `npm run build` and serve **only `dist/`** from any static HT
 - Landing on the foot of a ladder climbs to its top. Landing on a snake’s head slides down to its tail.
 - On your turn the die simply appears in the middle of the screen. Grab it and fling it; a click on it gives it a gentle toss, and Space or Enter tosses it from the keyboard. It bounces off the edges of the screen before it lands. The rest of the page stays usable while it waits. The throw is for show: every roll is an independent fair throw. With reduced motion a **Roll the dice** button appears instead.
 - **Calm effects** is a per-viewer switch that stops flashing, twinkling, falling snow and the die's flickering faces. It is remembered in that browser and never shared.
+- Each turn has a **15-second clock**, shown under the turn status. When it runs out the turn passes to the next player. After a roll the clock waits three seconds for the throw to land. In Refract the coordinator keeps the official time and allows 1.5 seconds of grace for a throw already on its way. Computer opponents are not timed.
+- The last five seconds beep for the player whose turn it is: a rising tick each second, then a low buzz at zero. **Turn sounds** switches the beeps off for that viewer.
 - A six earns another roll.
 - The last square needs an exact roll. A roll that would overshoot leaves the token where it is.
 - Seven ladders and eight snakes are fixed in [`src/game.js`](src/game.js); edit `LADDERS` and `SNAKES` to change the board. The drawing follows the data.

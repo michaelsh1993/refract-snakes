@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createGame, playRoll } from '../src/game.js';
-import { createSession, GAME_PROTOCOL } from '../src/session.js';
+import { createSession, GAME_PROTOCOL, TURN_GRACE_MS, TURN_MS, TURN_SETTLE_MS } from '../src/session.js';
 
 const person = (id) => ({ id, name: `Player ${id}`, avatarUrl: null });
 const memoryStorage = () => {
@@ -20,6 +20,8 @@ function network(initialIds = [1, 2], { persistence = true, dice = [] } = {}) {
   let seed = 11;
   // A fake clock, so the theme cooldown can be passed or hit on purpose.
   let clock = 0;
+  // Fake timers, run only by net.advance(), so turn timeouts happen exactly when a test says.
+  let timers = [];
 
   function add(id) {
     if (!stores.has(id)) stores.set(id, memoryStorage());
@@ -27,6 +29,8 @@ function network(initialIds = [1, 2], { persistence = true, dice = [] } = {}) {
     client.session = createSession({
       storage: persistence ? stores.get(id) : null,
       now: () => clock,
+      setTimer(run, ms) { const timer = { at: clock + ms, run }; timers.push(timer); return timer; },
+      clearTimer(timer) { timers = timers.filter((other) => other !== timer); },
       rollDie() {
         client.rolled += 1;
         if (dice.length) return dice.shift();
@@ -68,6 +72,19 @@ function network(initialIds = [1, 2], { persistence = true, dice = [] } = {}) {
     view: (id) => clients.get(id).view,
     state: () => clients.get(memberIds[0]).view.state,
     roll(id) { clients.get(id).session.roll(); flush(); },
+    advance(ms) {
+      const until = clock + ms;
+      for (;;) {
+        const due = timers.filter((timer) => timer.at <= until).sort((a, b) => a.at - b.at)[0];
+        if (!due) break;
+        timers = timers.filter((timer) => timer !== due);
+        clock = due.at;
+        due.run();
+        flush();
+      }
+      clock = until;
+    },
+    timers: () => timers.length,
     theme(id, theme, { wait = true } = {}) {
       if (wait) clock += 1500;
       clients.get(id).session.setTheme(theme);
@@ -349,6 +366,48 @@ test('theme spam is rate limited and never voids, replays, or skips a roll', () 
   net.clients.get(1).session.receive(request.from, request.packet);
   net.flush();
   assert.equal(net.state().rolls, 2);
+  net.assertConverged();
+});
+
+test('a turn times out on the host, passes on, and restarts for every new turn but not for themes', () => {
+  const net = network([1, 2, 3], { dice: [3] });
+  const limit = TURN_MS + TURN_GRACE_MS;
+  net.advance(limit - 1);
+  assert.equal(net.state().turn, 0);
+  net.advance(1);
+  assert.deepEqual([net.state().turn, net.state().lastSkip], [1, 0]);
+  net.assertConverged();
+  // A theme change does not give Sam more time.
+  net.advance(5000);
+  net.theme(2, 'jungle', { wait: false });
+  net.advance(limit - 5000);
+  assert.equal(net.state().turn, 2);
+  // A roll starts a fresh turn, with time for the throw to land first.
+  net.roll(3);
+  assert.equal(net.state().turn, 0);
+  net.advance(TURN_SETTLE_MS + limit - 1);
+  assert.equal(net.state().turn, 0);
+  net.advance(1);
+  assert.equal(net.state().turn, 1);
+  assert.equal(net.state().skips, 3);
+  net.assertConverged();
+});
+
+test('only the host keeps time, the clock stops between rounds, and a new host takes over', () => {
+  const net = network([1, 2]);
+  assert.equal(net.timers(), 1);
+  net.playToWin();
+  assert.equal(net.timers(), 0);
+  net.advance(TURN_MS * 3);
+  assert.equal(net.state().skips, 0);
+  net.rematch(2);
+  assert.equal(net.timers(), 1);
+  net.join(3);
+  net.leave(1);
+  assert.equal(net.view(2).isHost, true);
+  const turn = net.state().turn;
+  net.advance(TURN_MS + TURN_GRACE_MS);
+  assert.notEqual(net.state().turn, turn);
   net.assertConverged();
 });
 
