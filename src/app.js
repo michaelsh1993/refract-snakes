@@ -96,7 +96,7 @@ let tokenKey = null;
 let tokenState = null;
 let stepTimer = null;
 // A thrown die may fly for up to THROW_MS, then shows its result for THROW_HOLD_MS.
-const THROW_MS = 1900;
+const THROW_MS = 2600;
 const THROW_HOLD_MS = 1000;
 let throwTimer = null;
 // Lands the die by the clock if animation frames stall, as in a background or hidden frame.
@@ -488,6 +488,16 @@ function stepDie(dt, held) {
   // Rolling: the faster it moves, the faster it tumbles end over end.
   die.rx -= die.vy * 0.42 * dt;
   die.ry += die.vx * 0.42 * dt;
+  // Once the result is known, a slowing die is drawn onto that face, more firmly the
+  // slower it goes. The face it comes to rest on is the roll; nothing changes after.
+  if (!held && die.value !== null) {
+    const [tx, ty] = FACE_TURNS[die.value];
+    const settle = Math.max(0, 1 - Math.hypot(die.vx, die.vy) / 2400);
+    const pull = Math.min(1, settle * settle * 22 * dt);
+    die.rx += (nearestTurn(tx, die.rx) - die.rx) * pull;
+    die.ry += (nearestTurn(ty, die.ry) - die.ry) * pull;
+    die.angle += (Math.round(die.angle / 90) * 90 - die.angle) * pull;
+  }
   die.travelled += Math.hypot(die.vx, die.vy) * dt;
 
   // Bounce off the edges of the screen, losing a little speed and picking up spin.
@@ -533,7 +543,10 @@ function tick(now) {
 
   if (!held) {
     const elapsed = now - die.started;
-    if (die.value !== null && elapsed >= 500 && (Math.hypot(die.vx, die.vy) < 70 || elapsed >= THROW_MS)) {
+    // It lands only once it is slow and already lying on its result face (or time is up).
+    const [tx, ty] = FACE_TURNS[die.value] ?? [0, 0];
+    const off = Math.max(Math.abs(nearestTurn(tx, die.rx) - die.rx), Math.abs(nearestTurn(ty, die.ry) - die.ry));
+    if (die.value !== null && elapsed >= 500 && ((Math.hypot(die.vx, die.vy) < 70 && off < 6) || elapsed >= THROW_MS)) {
       landDie();
       return;
     }
@@ -798,6 +811,7 @@ function render() {
   miniDie.setAttribute('aria-label', value ? `Last roll: ${value}` : 'No roll yet');
   renderPowers(state, { mine, canPlay: canRoll && state.mode === 'chaos' && !state.powerUsed });
   announcePower(state, mine);
+  updateFeed(state, mine);
   $('roll').disabled = !canRoll;
   rollSeat = canRoll ? state.turn : null;
   // On this player's turn the die simply appears, ready to throw. With reduced motion the
@@ -838,6 +852,91 @@ function render() {
     }
   } else {
     $('player-count').textContent = `${playerCount} PLAYERS`;
+  }
+}
+
+// ---------- Game feed ----------
+// Each browser keeps its own running log of what happens, from when it opened the game.
+// Rolls are posted once the die has landed, so the feed never gives the result away.
+const FEED_LIMIT = 80;
+let feedSeen = null;
+let feedDue = 0;
+let feedPeople = null;
+
+function postFeed({ seat = null, icon = null, die: value = null, text }, delay = 0) {
+  const now = performance.now();
+  feedDue = Math.max(now + delay, feedDue);
+  setTimeout(() => {
+    const item = document.createElement('li');
+    item.className = 'feed-item';
+    item.dataset.seat = seat === null ? 'none' : String(seat);
+    const mark = document.createElement('span');
+    if (value) {
+      mark.className = 'die feed-die';
+      mark.dataset.value = String(value);
+      mark.dataset.seat = item.dataset.seat;
+      mark.setAttribute('aria-label', `Rolled ${value}`);
+      for (let pip = 0; pip < 9; pip += 1) mark.append(document.createElement('i'));
+    } else {
+      mark.className = 'feed-icon';
+      mark.textContent = icon ?? '•';
+    }
+    const words = document.createElement('span');
+    words.className = 'feed-text';
+    words.textContent = text;
+    const time = document.createElement('time');
+    time.className = 'feed-time';
+    time.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    item.append(mark, words, time);
+    const list = $('feed-list');
+    list.prepend(item);
+    while (list.children.length > FEED_LIMIT) list.lastElementChild.remove();
+  }, Math.max(0, feedDue - now));
+}
+
+function updateFeed(state, mine) {
+  const ready = !embedded || !!liveView?.connected;
+  if (!ready) return;
+  const seen = {
+    phase: state.phase, round: state.round, rolls: state.rolls, powers: state.powers, skips: state.skips,
+    winner: state.winner, mode: state.mode,
+  };
+  // People opening and closing the game, in Refract.
+  if (embedded) {
+    const people = liveView.participants;
+    if (feedPeople) {
+      for (const person of people) if (!feedPeople.has(person.id)) postFeed({ icon: '👋', text: `${person.name} opened the game.` });
+      for (const [id, name] of feedPeople) if (!people.some((person) => person.id === id)) postFeed({ icon: '🚪', text: `${name} left.` });
+    }
+    feedPeople = new Map(people.map((person) => [person.id, person.name]));
+  }
+  const before = feedSeen;
+  feedSeen = seen;
+  if (!before) {
+    postFeed({ icon: '✨', text: state.phase === 'lobby' ? 'You’re in the lobby.' : 'You joined a game in progress.' });
+    return;
+  }
+  const settled = still() ? 0 : THROW_MS + 400;
+  if (seen.phase !== before.phase) {
+    if (seen.phase === 'playing') postFeed({ icon: '🏁', text: `Game on: ${state.mode === 'chaos' ? 'Chaos' : 'Classic'}, ${state.turnSeconds}-second turns.` });
+    else postFeed({ icon: '🏠', text: 'Back to the lobby.' });
+    return;
+  }
+  if (seen.phase !== 'playing') return;
+  if (seen.round > before.round) postFeed({ icon: '🔁', text: `Round ${seen.round} begins.` });
+  if (seen.skips > before.skips && state.lastEvent === 'skip' && state.lastSkip !== null) {
+    const you = state.lastSkip === mine && (embedded || mode === 'computer');
+    postFeed({ seat: state.lastSkip, icon: '⏱️', text: `${you ? 'You' : nameFor(state.lastSkip, state)} ran out of time.${frozenNote(state)}` });
+  }
+  if (seen.powers > before.powers && state.lastPower) {
+    postFeed({ seat: state.lastPower.seat, icon: POWER_UPS[state.lastPower.power].icon, text: describePower(state, mine) });
+  }
+  if (seen.rolls > before.rolls && state.lastRoll && seen.round === before.round) {
+    postFeed({ seat: state.lastRoll.seat, die: state.lastRoll.die, text: describeRoll(state, mine) }, settled);
+  }
+  if (seen.winner !== null && before.winner === null) {
+    const you = seen.winner === mine && (embedded || mode === 'computer');
+    postFeed({ seat: seen.winner, icon: '🏆', text: `${you ? 'You win' : `${nameFor(seen.winner, state)} wins`} round ${seen.round}!` }, settled);
   }
 }
 
@@ -975,6 +1074,9 @@ function renderPowers(state, { mine, canPlay }) {
   const tray = $('powers');
   const show = state.mode === 'chaos' && mine !== null && state.players[mine] !== null;
   tray.hidden = !show;
+  document.body.classList.toggle('has-powers', show);
+  tray.classList.toggle('live', show && canPlay);
+  if (show) tray.dataset.seat = String(mine);
   if (!show) { aiming = null; return; }
   const hand = state.hands[mine];
   $('powers-note').textContent = !hand.length ? 'All used' : state.powerUsed && mine === state.turn ? 'Used this turn' : canPlay ? 'Play one, then throw' : 'On your turn';
@@ -996,7 +1098,10 @@ function renderPowers(state, { mine, canPlay }) {
       const name = document.createElement('span');
       name.className = 'power-name';
       name.textContent = info.name;
-      button.append(icon, name);
+      const blurb = document.createElement('span');
+      blurb.className = 'power-blurb';
+      blurb.textContent = info.blurb;
+      button.append(icon, name, blurb);
       button.addEventListener('click', () => {
         if (info.aim === 'other') {
           aiming = slot;

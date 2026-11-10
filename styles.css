@@ -14,7 +14,9 @@ button:focus-visible { outline: 3px solid var(--cyan); outline-offset: 3px; }
 [data-seat="none"] { --seat: var(--line); }
 
 /* The board fills the frame; a narrow rail beside it holds the turn and the players. */
-.app { height: 100svh; display: grid; gap: var(--gap); padding: var(--gap); grid-template-columns: minmax(0, 1fr) var(--rail); grid-template-rows: auto minmax(0, 1fr); grid-template-areas: "board hud" "board details"; }
+.app { --feed: clamp(170px, 17vw, 250px); height: 100svh; display: grid; gap: var(--gap); padding: var(--gap); grid-template-columns: var(--feed) minmax(0, 1fr) var(--rail); grid-template-rows: auto minmax(0, 1fr); grid-template-areas: "feed board hud" "feed board details"; }
+/* Room at the bottom for the power-up toolbar, so it never covers the board. */
+body.has-powers .app { padding-bottom: calc(var(--gap) + 118px); }
 .stage { grid-area: board; min-width: 0; min-height: 0; container-type: size; display: grid; place-items: center; }
 .hud { grid-area: hud; min-width: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px 14px; }
 .details { grid-area: details; min-width: 0; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; scrollbar-width: thin; }
@@ -68,7 +70,26 @@ html.manual-roll .roll-button { display: block; }
 .count-switch { margin-top: 6px; }
 .mode-hint, .refract-info p { color: var(--muted); font-size: 11px; margin: 9px 0 0; line-height: 1.55; }
 .refract-info p { margin-top: 0; }
-.refract-actions { display: flex; gap: 16px; margin-top: 8px; }
+.refract-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+.big-button { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 12px 14px; font-size: 13px; border-radius: 10px; }
+.big-button span { font-size: 16px; line-height: 1; }
+.big-button:hover { border-color: var(--cyan); }
+.leave-button.big-button { color: #ff9a9a; border-color: color-mix(in srgb, #ff6b6b 45%, var(--line)); }
+.leave-button.big-button:hover { background: color-mix(in srgb, #ff6b6b 14%, var(--raised)); border-color: #ff6b6b; }
+
+/* Game feed, down the left. */
+.feed { grid-area: feed; min-width: 0; min-height: 0; display: flex; flex-direction: column; padding: 12px 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; }
+.feed .section-heading { margin: 0 4px 8px; }
+.feed-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; scrollbar-width: thin; display: flex; flex-direction: column; gap: 6px; }
+.feed-item { display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-rows: auto auto; column-gap: 8px; padding: 7px 8px; border-radius: 9px; background: var(--raised); border-left: 3px solid var(--seat); animation: feed-in .3s ease-out; }
+.feed-item[data-seat="none"] { border-left-color: var(--line); }
+@keyframes feed-in { from { opacity: 0; transform: translateY(-6px); } }
+.feed-icon { grid-row: span 2; width: 24px; text-align: center; font-size: 16px; line-height: 1.3; }
+.feed-die { grid-row: span 2; width: 24px; height: 24px; padding: 4px; border-radius: 6px; }
+.feed-die i { width: 4px; height: 4px; }
+.feed-text { font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
+.feed-time { font-size: 9px; color: var(--faint); font-variant-numeric: tabular-nums; }
+html[data-calm="on"] .feed-item { animation: none; }
 .text-button { background: transparent; padding: 0; border: 0; color: var(--cyan); font-size: 11px; }
 .text-button span { margin-left: 5px; }
 .leave-button { color: var(--muted); }
@@ -246,15 +267,23 @@ html[data-board="christmas"] .weather { display: block; background-image: radial
 .lobby .theme-options button:disabled, .lobby .mode-switch button:disabled { opacity: .55; }
 
 /* Chaos mode */
-.powers { margin: 0 0 10px; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--raised); }
+/* Power-up toolbar: fixed along the bottom, above the dimmed die overlay, always bright. */
+.powers { position: fixed; z-index: 11; left: 50%; bottom: 10px; transform: translateX(-50%); width: min(820px, calc(100vw - 20px)); padding: 10px 12px 12px; border: 2px solid var(--line); border-radius: 16px; background: var(--panel); box-shadow: 0 16px 50px #000c; }
+.powers.live { border-color: var(--seat); box-shadow: 0 16px 50px #000c, 0 0 0 4px color-mix(in srgb, var(--seat) 22%, transparent), 0 0 40px color-mix(in srgb, var(--seat) 30%, transparent); }
+.powers-title { color: var(--text); font-weight: 700; }
+.powers.live .powers-head span:last-child { color: var(--seat); font-weight: 700; }
 .powers-head { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 8px; font-size: 9px; letter-spacing: 1.2px; color: var(--faint); }
 .powers-head span:last-child { letter-spacing: 0; font-size: 10px; color: var(--muted); }
-.power-slots { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
-.power { display: flex; flex-direction: column; align-items: center; gap: 3px; min-width: 0; padding: 8px 4px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); color: var(--text); }
+.power-slots { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 8px; }
+.power-slots:empty::after { content: 'No power-ups left. Roll a 3 to win one.'; font-size: 12px; color: var(--muted); }
+.power { display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-rows: auto auto; align-items: center; column-gap: 10px; min-width: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--raised); color: var(--text); text-align: left; }
+.power-blurb { grid-column: 2; font-size: 10px; color: var(--muted); line-height: 1.35; }
 .power:enabled:hover { border-color: var(--cyan); transform: translateY(-1px); }
 .power:disabled { opacity: .5; }
-.power-icon { font-size: 22px; line-height: 1; }
-.power-name { font-size: 10px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.power-icon { grid-row: span 2; font-size: 30px; line-height: 1; }
+.power-name { font-size: 13px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.powers.live .power:enabled { border-color: color-mix(in srgb, var(--seat) 60%, var(--line)); }
+.powers.live .power:enabled:hover { background: color-mix(in srgb, var(--seat) 14%, var(--raised)); border-color: var(--seat); transform: translateY(-2px); }
 .power-targets { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; font-size: 11px; color: var(--muted); }
 .target-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
 .target { padding: 6px 10px; border-radius: 999px; border: 1px solid var(--seat); background: color-mix(in srgb, var(--seat) 16%, var(--panel)); color: var(--text); font-size: 11px; font-weight: 600; }
@@ -308,7 +337,8 @@ body.throwing #status-detail, body.throwing #die i { visibility: hidden; }
 /* Tall or narrow frames: the turn sits above the board and a compact player strip below it. */
 @media (max-width: 720px), (max-aspect-ratio: 1 / 1) {
   :root { --gap: 10px; }
-  .app { min-height: 340px; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(min(calc(100vw - 20px), 58svh), 1fr) minmax(0, auto); grid-template-areas: "hud" "board" "details"; }
+  .app { min-height: 340px; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(min(calc(100vw - 20px), 58svh), 1fr) minmax(0, auto) minmax(0, auto); grid-template-areas: "hud" "board" "details" "feed"; }
+  .feed { max-height: 180px; }
   .hud { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "top top" "turn roll"; align-items: center; column-gap: 12px; padding: 10px 12px; }
   .hud-top { grid-area: top; }
   .turn-bar { grid-area: turn; padding: 8px 0 0; min-height: 0; }
