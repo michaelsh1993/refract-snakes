@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>Refract activity · Local multiplayer preview</title>
+    <link rel="stylesheet" href="./preview.css" />
+    <script type="module" src="./preview.js"></script>
+  </head>
+  <body>
+    <main class="preview">
+      <header class="preview-header">
+        <div>
+          <a class="brand" href="../index.html"><span aria-hidden="true">◈</span> REFRACT / ACTIVITIES</a>
+          <p class="eyebrow">LOCAL REFRACT PROTOCOL SIMULATOR</p>
+          <h1>One board. Every perspective.</h1>
+          <p class="intro">Play as Alex and Sam below, then add up to three more people. Each view runs the real activity in its own frame, with the same messages used in a Refract call. The first four take a token; a fifth watches.</p>
+        </div>
+        <div class="session-badge"><span class="status-dot" aria-hidden="true"></span> Local session <span id="session-number">01</span></div>
+      </header>
+
+      <nav class="toolbar" aria-label="Preview controls">
+        <button type="button" id="new-session" class="primary">New session</button>
+        <button type="button" id="add-participant">Add participant</button>
+        <button type="button" id="remove-participant" disabled>Remove last</button>
+        <label class="theme-control">Activity theme
+          <select id="activity-theme"><option value="dark">Dark</option><option value="light">Light</option></select>
+        </label>
+        <span class="participant-summary" id="participant-summary" aria-live="polite">2 participants</span>
+      </nav>
+
+      <section class="views" id="views" aria-label="Participant views"></section>
+
+      <footer class="preview-footer">
+        <p><strong>Try the lifecycle.</strong> Refresh a view to check state recovery, add a participant mid-round to see them start from square zero, or leave the activity to check seat and host handover. New session resets everyone.</p>
+        <details>
+          <summary>Protocol activity <span id="event-count">0 events</span></summary>
+          <ol id="event-log" aria-label="Recent protocol events"></ol>
+        </details>
+        <p class="fine-print">This preview simulates Refract’s frame bridge locally. Real call, account, and socket connectivity still need checking inside your Refract instance.</p>
+      </footer>
+    </main>
+  </body>
+</html>

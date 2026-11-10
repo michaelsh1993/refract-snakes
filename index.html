@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#080d18">
+    <meta name="description" content="Climb the ladders, mind the snakes. Play snakes and ladders together in a Refract call, or practice on your own. An open-source Refract activity.">
+    <title>Snakes and ladders · Refract Activities</title>
+    <link rel="icon" type="image/svg+xml" href="./assets/favicon.svg">
+    <link rel="stylesheet" href="./styles.css">
+    <script type="module" src="./src/app.js"></script>
+  </head>
+  <body>
+    <main class="app">
+      <section class="hud" aria-label="Turn">
+        <div class="hud-top">
+          <span id="connection" class="connection"><span class="status-dot"></span><span id="connection-label">Local practice</span></span>
+          <span id="round" class="round-badge">ROUND 01</span>
+        </div>
+        <div class="turn-bar">
+          <span id="status-token" class="status-token" data-seat="0" aria-hidden="true"></span>
+          <div class="turn-copy"><p id="status" role="status" aria-live="polite">Your roll</p><p id="status-detail" role="status" aria-live="polite">Click roll to pick up the die, shake it, and click again to throw.</p></div>
+        </div>
+        <div class="roll-row">
+          <span id="die" class="die" data-value="0" role="img" aria-label="No roll yet"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
+          <button class="primary-button roll-button" id="roll" type="button" disabled>Roll the dice</button>
+        </div>
+      </section>
+
+      <div class="stage">
+        <div id="board" class="board" role="img" aria-label="Snakes and ladders board">
+          <div id="cells" class="cells" aria-hidden="true"></div>
+          <svg id="routes" class="routes" viewBox="0 0 100 100" aria-hidden="true" focusable="false"></svg>
+          <div class="weather" aria-hidden="true"></div>
+          <div class="tokens" aria-hidden="true"><span class="token" data-seat="0">1</span><span class="token" data-seat="1">2</span><span class="token" data-seat="2">3</span><span class="token" data-seat="3">4</span></div>
+        </div>
+      </div>
+
+      <aside class="details">
+        <section class="players" aria-labelledby="players-heading">
+          <div class="section-heading"><h2 id="players-heading">Players</h2><span id="player-count" class="small-label">2 PLAYERS</span></div>
+          <div class="player-card" id="player-0" data-seat="0"><span class="player-token" aria-hidden="true">1</span><div class="player-copy"><h3 id="name-0">You</h3><span id="detail-0">At the start</span></div><span class="player-score"><strong id="score-0">0</strong><span>WINS</span></span></div>
+          <div class="player-card" id="player-1" data-seat="1"><span class="player-token" aria-hidden="true">2</span><div class="player-copy"><h3 id="name-1">Computer</h3><span id="detail-1">At the start</span></div><span class="player-score"><strong id="score-1">0</strong><span>WINS</span></span></div>
+          <div class="player-card" id="player-2" data-seat="2" hidden><span class="player-token" aria-hidden="true">3</span><div class="player-copy"><h3 id="name-2">Player 3</h3><span id="detail-2">At the start</span></div><span class="player-score"><strong id="score-2">0</strong><span>WINS</span></span></div>
+          <div class="player-card" id="player-3" data-seat="3" hidden><span class="player-token" aria-hidden="true">4</span><div class="player-copy"><h3 id="name-3">Player 4</h3><span id="detail-3">At the start</span></div><span class="player-score"><strong id="score-3">0</strong><span>WINS</span></span></div>
+          <p id="spectators" class="spectator-note" hidden></p>
+        </section>
+        <div class="game-actions"><span id="round-note">A fresh board. Mind the snakes.</span><button class="primary-button" id="next-round" type="button" disabled>Next round <span aria-hidden="true">↗</span></button></div>
+        <p id="notice" class="notice" role="status" hidden></p>
+        <section class="theme-picker" aria-labelledby="theme-heading">
+          <div class="section-heading"><h2 id="theme-heading">Board</h2><span id="theme-scope" class="small-label"></span></div>
+          <div class="theme-options" role="group" aria-label="Board theme">
+            <button type="button" data-board-theme="classic" aria-pressed="true"><span class="swatch" aria-hidden="true"></span>Classic</button>
+            <button type="button" data-board-theme="christmas" aria-pressed="false"><span class="swatch" aria-hidden="true"></span>Christmas</button>
+            <button type="button" data-board-theme="jungle" aria-pressed="false"><span class="swatch" aria-hidden="true"></span>Jungle</button>
+            <button type="button" data-board-theme="space" aria-pressed="false"><span class="swatch" aria-hidden="true"></span>Space</button>
+          </div>
+        </section>
+        <div id="local-modes" class="mode-section">
+          <div class="mode-switch" role="group" aria-label="Practice mode"><button type="button" id="mode-computer" aria-pressed="true">vs computer</button><button type="button" id="mode-local" aria-pressed="false">pass & play</button></div>
+          <div class="mode-switch count-switch" role="group" aria-label="Number of players"><button type="button" data-count="2" aria-pressed="true">2 players</button><button type="button" data-count="3" aria-pressed="false">3</button><button type="button" data-count="4" aria-pressed="false">4</button></div>
+          <p class="mode-hint" id="mode-hint">You against the dice, and a computer that rolls its own.</p>
+        </div>
+        <div id="refract-info" class="refract-info" hidden><p id="seat-description">Your seat is being prepared.</p><div class="refract-actions"><button id="sync" class="text-button" type="button">Resync <span aria-hidden="true">↻</span></button><button id="leave" class="text-button leave-button" type="button">Leave game <span aria-hidden="true">↗</span></button></div></div>
+      </aside>
+    </main>
+    <div id="throw" class="throw" data-seat="none" aria-hidden="true"><span id="big-die" class="die big-die" data-value="0"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span><span class="throw-hint">Shake it. Click to throw.</span></div>
+    <noscript>This activity needs JavaScript to play. Enable JavaScript, then reload this page.</noscript>
+  </body>
+</html>

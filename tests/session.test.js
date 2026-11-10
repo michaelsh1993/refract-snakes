@@ -1,0 +1,387 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createGame, playRoll } from '../src/game.js';
+import { createSession, GAME_PROTOCOL } from '../src/session.js';
+
+const person = (id) => ({ id, name: `Player ${id}`, avatarUrl: null });
+const memoryStorage = () => {
+  const values = new Map();
+  return { getItem: (key) => values.get(key) ?? null, setItem: (key, value) => values.set(key, value) };
+};
+
+// `dice` is the queue of upcoming rolls; once it is empty a fixed sequence takes over.
+function network(initialIds = [1, 2], { persistence = true, dice = [] } = {}) {
+  const clients = new Map();
+  const queue = [];
+  const sent = [];
+  const stores = new Map();
+  let memberIds = [...initialIds];
+  let sessionId = 'test-session';
+  let seed = 11;
+
+  function add(id) {
+    if (!stores.has(id)) stores.set(id, memoryStorage());
+    const client = { view: null, rolled: 0 };
+    client.session = createSession({
+      storage: persistence ? stores.get(id) : null,
+      rollDie() {
+        client.rolled += 1;
+        if (dice.length) return dice.shift();
+        seed = (seed * 1103515245 + 12345) % 2147483648;
+        return seed % 6 + 1;
+      },
+      send(data, to) {
+        const message = { from: id, data: structuredClone(data), to };
+        queue.push(message);
+        sent.push(message);
+      },
+      onChange(view) { client.view = view; },
+    });
+    clients.set(id, client);
+    return client;
+  }
+
+  function init(id) {
+    clients.get(id).session.init({ sessionId, self: person(id), participants: memberIds.map(person) });
+  }
+
+  function flush() {
+    let count = 0;
+    while (queue.length) {
+      assert.ok(count++ < 1000, 'message exchange must settle');
+      const { from, data, to } = queue.shift();
+      for (const [id, client] of clients) {
+        if (id !== from && (!to || to.includes(id)) && memberIds.includes(id)) client.session.receive(from, structuredClone(data));
+      }
+    }
+  }
+
+  for (const id of initialIds) add(id);
+  for (const id of initialIds) init(id);
+  flush();
+
+  const net = {
+    clients, sent, queue, flush, init, dice,
+    view: (id) => clients.get(id).view,
+    state: () => clients.get(memberIds[0]).view.state,
+    roll(id) { clients.get(id).session.roll(); flush(); },
+    theme(id, theme) { clients.get(id).session.setTheme(theme); flush(); },
+    rematch(id) { clients.get(id).session.rematch(); flush(); },
+    // Whoever holds the turn keeps rolling until somebody reaches the last square.
+    playToWin() {
+      for (let count = 0; net.state().winner === null; count += 1) {
+        assert.ok(count < 5000, 'a round must finish');
+        net.roll(net.state().players[net.state().turn]);
+      }
+      return net.state().winner;
+    },
+    join(id) {
+      memberIds.push(id);
+      for (const client of clients.values()) client.session.setParticipants(memberIds.map(person));
+      add(id);
+      init(id);
+      flush();
+    },
+    leave(id) {
+      clients.get(id).session.destroy();
+      clients.delete(id);
+      memberIds = memberIds.filter((member) => member !== id);
+      for (const client of clients.values()) client.session.setParticipants(memberIds.map(person));
+      flush();
+    },
+    reload(id) {
+      clients.get(id).session.destroy();
+      add(id);
+      init(id);
+      flush();
+    },
+    newSession() {
+      sessionId = 'new-session';
+      for (const id of memberIds) init(id);
+      flush();
+    },
+    packet(kind, extra = {}) {
+      const state = net.state();
+      return { protocol: GAME_PROTOCOL, sessionId, hostId: memberIds[0], kind, round: state.round, revision: state.revision, ...extra };
+    },
+    assertConverged() {
+      const host = clients.get(memberIds[0]).view;
+      for (const client of clients.values()) {
+        assert.equal(client.view.connected, true);
+        assert.deepEqual(client.view.state, host.state);
+        assert.equal(client.view.hostId, memberIds[0]);
+      }
+    },
+  };
+  return net;
+}
+
+test('the host rolls for everyone: its own turns, guest requests, and never for spectators', () => {
+  const net = network([1, 2, 3, 4, 5], { dice: [3, 5, 2] });
+  assert.deepEqual(net.state().players, [1, 2, 3, 4]);
+  net.roll(1);
+  net.roll(2);
+  net.roll(5);
+  assert.deepEqual(net.state().positions, [3, 5, 0, 0]);
+  assert.equal(net.state().turn, 2);
+  assert.match(net.view(5).notice, /watching/);
+  assert.equal(net.clients.get(2).rolled, 0);
+  assert.deepEqual(net.dice, [2]);
+  net.assertConverged();
+});
+
+test('host rejects wrong-turn, spectator, stale, spoofed and chosen-die proposals', () => {
+  const net = network([1, 2, 3, 4, 5], { dice: [2] });
+  const host = net.clients.get(1).session;
+  for (const [from, packet] of [
+    [2, net.packet('roll')],
+    [5, net.packet('roll', { playerId: 1 })],
+    [99, net.packet('roll')],
+    [1, net.packet('roll', { revision: -1 })],
+    [1, net.packet('roll', { round: 2 })],
+    [1, net.packet('roll', { sessionId: 'old' })],
+    [1, net.packet('roll', { protocol: 'other-app/1' })],
+    [1, net.packet('roll', { hostId: 2 })],
+    [1, net.packet('move', { index: 0 })],
+    [1, net.packet('rematch')],
+  ]) host.receive(from, packet);
+  net.flush();
+  assert.equal(net.state().revision, 0);
+  assert.deepEqual(net.dice, [2]);
+  const proposal = net.packet('roll', { die: 6 });
+  host.receive(1, proposal);
+  host.receive(1, proposal);
+  net.flush();
+  assert.equal(net.state().revision, 1);
+  assert.equal(net.state().positions[0], 2);
+  net.assertConverged();
+});
+
+test('a late arrival takes an empty seat at square zero without disturbing the game', () => {
+  const net = network([1, 2], { dice: [3, 5] });
+  net.roll(1);
+  net.roll(2);
+  net.join(3);
+  net.reload(2);
+  assert.deepEqual(net.state().players, [1, 2, 3, null]);
+  assert.deepEqual(net.state().positions, [3, 5, 0, 0]);
+  assert.equal(net.state().turn, 0);
+  assert.equal(net.view(2).state.revision, 3);
+  net.roll(1);
+  net.roll(2);
+  net.roll(3);
+  assert.equal(net.state().revision, 6);
+  net.assertConverged();
+});
+
+test('host reload restores the saved round and remains playable', () => {
+  const net = network([1, 2], { dice: [3, 5, 2] });
+  net.roll(1);
+  net.roll(2);
+  net.reload(1);
+  assert.equal(net.state().revision, 2);
+  net.roll(1);
+  net.assertConverged();
+  assert.deepEqual(net.view(2).state.positions, [5, 5, 0, 0]);
+});
+
+test('a host reload with storage disabled resynchronizes a fresh game instead of deadlocking', () => {
+  const net = network([1, 2], { persistence: false, dice: [3, 5, 2, 1] });
+  net.roll(1);
+  net.roll(2);
+  net.reload(1);
+  assert.equal(net.state().revision, 0);
+  net.assertConverged();
+  net.roll(1);
+  net.roll(2);
+  assert.deepEqual(net.view(2).state.positions, [2, 1, 0, 0]);
+  net.assertConverged();
+});
+
+test('duplicate initialization preserves a live game', () => {
+  const net = network([1, 2], { dice: [3] });
+  net.roll(1);
+  net.init(1);
+  net.init(2);
+  net.flush();
+  assert.equal(net.state().revision, 1);
+  assert.equal(net.view(2).state.positions[0], 3);
+  net.assertConverged();
+});
+
+test('malformed, wrong-host, wrong-roster and stale snapshots do not alter the game', () => {
+  const net = network([1, 2, 3], { dice: [3] });
+  const old = structuredClone(net.state());
+  net.roll(1);
+  const current = structuredClone(net.view(2).state);
+  const guest = net.clients.get(2).session;
+  const valid = net.packet('state', { members: [1, 2, 3], state: current });
+  for (const packet of [null, {}, { ...valid, state: {} }, { ...valid, members: [1, 2] },
+    { ...valid, state: { ...current, positions: [100, 100, 100, 100] } },
+    { ...valid, state: { ...current, scores: [-1, 0, 0, 0] } },
+    { ...valid, state: { ...current, players: [1, 999, 3, null] } },
+    { ...valid, sessionId: 'wrong-session' }, { ...valid, state: old },
+  ]) guest.receive(1, packet);
+  guest.receive(3, { ...valid, state: playRoll(current, 2, 4) });
+  assert.deepEqual(net.view(2).state, current);
+  net.flush();
+  net.assertConverged();
+});
+
+test('a completed round can be rematched once by any seated player', () => {
+  const net = network([1, 2, 3, 4, 5]);
+  net.rematch(1);
+  assert.equal(net.state().round, 1);
+  const winner = net.playToWin();
+  assert.equal(net.state().positions[winner], 100);
+  const finished = net.state().revision;
+  net.roll(net.state().players[winner]);
+  assert.equal(net.state().revision, finished);
+  net.rematch(5);
+  assert.equal(net.state().round, 1);
+  const stale = net.packet('rematch');
+  net.rematch(3);
+  net.clients.get(1).session.receive(2, stale);
+  net.flush();
+  assert.equal(net.state().round, 2);
+  assert.equal(net.state().turn, 1);
+  assert.deepEqual(net.state().positions, [0, 0, 0, 0]);
+  assert.equal(net.state().scores[winner], 1);
+  net.roll(2);
+  net.assertConverged();
+});
+
+test('a leaving player frees a seat for the earliest spectator and the turn moves on', () => {
+  const net = network([1, 2, 3, 4, 5], { dice: [3] });
+  net.roll(1);
+  assert.equal(net.state().turn, 1);
+  net.leave(2);
+  assert.deepEqual(net.state().players, [1, 5, 3, 4]);
+  assert.deepEqual(net.state().positions, [3, 0, 0, 0]);
+  assert.equal(net.state().turn, 1);
+  net.roll(5);
+  net.leave(5);
+  assert.deepEqual(net.state().players, [1, null, 3, 4]);
+  assert.equal(net.state().positions[1], 0);
+  net.assertConverged();
+});
+
+test('host departure elects the first remaining member and the game carries on', () => {
+  const net = network([1, 2, 3], { dice: [3, 5, 2] });
+  net.roll(1);
+  net.roll(2);
+  const oldPacket = net.packet('state', { state: structuredClone(net.state()), members: [1, 2, 3] });
+  net.leave(1);
+  assert.equal(net.view(2).isHost, true);
+  assert.deepEqual(net.state().players, [null, 2, 3, null]);
+  assert.deepEqual(net.state().positions, [0, 5, 0, 0]);
+  assert.equal(net.state().turn, 2);
+  assert.match(net.view(2).notice, /host left/);
+  net.clients.get(3).session.receive(1, oldPacket);
+  net.roll(3);
+  assert.deepEqual(net.state().positions, [0, 5, 2, 0]);
+  net.assertConverged();
+});
+
+test('host recovery converges even when the new host missed the previous last roll', () => {
+  const net = network([1, 2, 3], { dice: [3] });
+  net.clients.get(1).session.roll();
+  const last = net.queue.pop();
+  net.clients.get(3).session.receive(last.from, last.data);
+  assert.equal(net.view(2).state.revision, 0);
+  assert.equal(net.view(3).state.revision, 1);
+  net.leave(1);
+  net.assertConverged();
+  assert.deepEqual(net.view(3).state.players, [null, 2, 3, null]);
+});
+
+test('anyone in the activity can change the shared board theme, and it outlasts rounds and reloads', () => {
+  const net = network([1, 2, 3, 4, 5], { dice: [3] });
+  net.theme(2, 'jungle');
+  assert.equal(net.view(5).state.theme, 'jungle');
+  net.theme(5, 'space');
+  assert.equal(net.view(1).state.theme, 'space');
+  net.theme(1, 'christmas');
+  net.assertConverged();
+  assert.equal(net.state().theme, 'christmas');
+  const host = net.clients.get(1).session;
+  const before = net.state().revision;
+  for (const theme of ['lava', 42, null, 'christmas']) host.receive(2, net.packet('theme', { theme }));
+  net.flush();
+  assert.equal(net.state().revision, before);
+  net.roll(1);
+  net.reload(1);
+  net.reload(3);
+  net.leave(2);
+  assert.equal(net.state().theme, 'christmas');
+  net.playToWin();
+  net.rematch(1);
+  assert.equal(net.state().theme, 'christmas');
+  net.assertConverged();
+});
+
+test('the host starts a new game on its preferred board', () => {
+  const sent = [];
+  let view;
+  const session = createSession({ storage: null, theme: 'space', send: (packet) => sent.push(packet), onChange: (next) => { view = next; } });
+  session.init({ sessionId: 'a', self: person(1), participants: [person(1), person(2)] });
+  assert.equal(view.state.theme, 'space');
+  assert.equal(sent.at(-1).state.theme, 'space');
+});
+
+test('a new activity session starts fresh and ignores old-session traffic', () => {
+  const net = network([1, 2], { dice: [3] });
+  net.roll(1);
+  const old = net.packet('roll');
+  net.newSession();
+  net.clients.get(1).session.receive(2, old);
+  assert.deepEqual(net.state(), createGame());
+  net.assertConverged();
+});
+
+test('single-player activities wait for another participant and fill the vacant seat', () => {
+  const net = network([1], { dice: [3] });
+  net.roll(1);
+  assert.equal(net.state().revision, 0);
+  assert.match(net.view(1).notice, /Waiting for another player/);
+  net.join(2);
+  net.roll(1);
+  assert.equal(net.state().positions[0], 3);
+  net.assertConverged();
+  net.leave(2);
+  assert.equal(net.state().players[1], null);
+  assert.match(net.view(1).notice, /Waiting for another player/);
+  net.join(3);
+  assert.deepEqual(net.state().players, [1, 3, null, null]);
+  net.assertConverged();
+});
+
+test('roster events before init are buffered, and destroy prevents further work', () => {
+  let view;
+  const sent = [];
+  const session = createSession({ storage: null, send: (packet) => sent.push(packet), onChange: (next) => { view = next; } });
+  session.setParticipants([person(1), person(2), person(3)]);
+  session.init({ sessionId: 'a', self: person(1), participants: [person(1), person(2)] });
+  assert.equal(view.participants.length, 3);
+  assert.deepEqual(view.state.players, [1, 2, 3, null]);
+  const before = sent.length;
+  session.destroy();
+  session.roll();
+  session.sync();
+  session.init({ sessionId: 'b', self: person(1), participants: [person(1), person(2)] });
+  assert.equal(sent.length, before);
+});
+
+test('unavailable or corrupt browser storage never prevents a live game', () => {
+  for (const storage of [
+    { getItem() { throw Error('blocked'); }, setItem() { throw Error('blocked'); } },
+    { getItem() { return '{not json'; }, setItem() {} },
+    { getItem() { return JSON.stringify({ state: {}, members: [1, 2], hostId: 1 }); }, setItem() {} },
+  ]) {
+    let view;
+    const session = createSession({ storage, rollDie: () => 3, send() {}, onChange: (next) => { view = next; } });
+    session.init({ sessionId: 'a', self: person(1), participants: [person(1), person(2)] });
+    session.roll();
+    assert.equal(view.state.positions[0], 3);
+  }
+});

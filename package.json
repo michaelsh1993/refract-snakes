@@ -1,0 +1,18 @@
+{
+  "name": "refract-snakes-and-ladders",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A playable snakes and ladders activity for Refract.",
+  "type": "module",
+  "license": "GPL-3.0-only",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "node tools/serve.js",
+    "start": "node tools/serve.js",
+    "build": "node tools/build.js",
+    "test": "node --test",
+    "check": "node tools/check.js"
+  }
+}
