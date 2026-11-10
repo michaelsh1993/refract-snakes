@@ -53,13 +53,23 @@ All asset URLs are relative, so repository subpaths work.
 
 Alternatively, run `npm run build` and serve **only `dist/`** from any static HTTPS host. Never deploy the whole working directory. The build has an explicit public-file allowlist; tests, tooling scripts, and local configuration stay out of the output.
 
+## Lobby
+
+Every game starts in a lobby laid over the board. In Refract nobody is seated automatically: choose **Join game** to take one of the four seats, or stay a **spectator**. While in the lobby, seated players can:
+
+- pick a **piece**: the plain numbered counter, or a duck, dino, UFO, pizza, ghost, octopus, robot, cheese or crown (your last pick is remembered);
+- choose the **game mode** (Classic or Chaos), the **turn timer** (5 to 30 seconds, 15 by default), and the **board** theme;
+- **start** the game once at least two players are seated.
+
+Nobody joins halfway: anyone who opens the activity during a game spectates until it returns to the lobby. Once a round is won, any player can start the **next round** or take everyone back to the **lobby**. A player who leaves gives up their seat; a game left with one player goes back to the lobby. The options are only available in the lobby. Local practice has the same lobby, with computer opponents or pass & play.
+
 ## Rules
 
 - Everyone starts off the board. Roll the die and move that many squares; first to square 100 wins the round.
 - Landing on the foot of a ladder climbs to its top. Landing on a snake’s head slides down to its tail.
-- On your turn the die simply appears in the middle of the screen. Grab it and fling it; a click on it gives it a gentle toss, and Space or Enter tosses it from the keyboard. It bounces off the edges of the screen before it lands. The rest of the page stays usable while it waits. The throw is for show: every roll is an independent fair throw. With reduced motion a **Roll the dice** button appears instead.
+- On your turn a 3D die appears in the middle of the screen. Grab it and fling it; a click on it gives it a gentle toss, and Space or Enter tosses it from the keyboard. It tumbles, bounces off the edges of the screen, and rolls over onto the face it lands on: the number never swaps at the end. The rest of the page stays usable while it waits. The throw is for show: every roll is an independent fair throw. With reduced motion a **Roll the dice** button appears instead.
 - **Calm effects** is a per-viewer switch that stops flashing, twinkling, falling snow and the die's flickering faces. It is remembered in that browser and never shared.
-- Each turn has a **15-second clock**, shown under the turn status. When it runs out the turn passes to the next player. After a roll the clock waits three seconds for the throw to land. In Refract the coordinator keeps the official time and allows 1.5 seconds of grace for a throw already on its way. Computer opponents are not timed.
+- Each turn has a clock, **15 seconds** unless the lobby set it between 5 and 30, shown under the turn status. When it runs out the turn passes to the next player. After a roll the clock waits three seconds for the throw to land. In Refract the coordinator keeps the official time and allows 1.5 seconds of grace for a throw already on its way. Computer opponents are not timed.
 - The last five seconds beep for the player whose turn it is: a rising tick each second, then a low buzz at zero. **Turn sounds** switches the beeps off for that viewer.
 - A six earns another roll.
 - The last square needs an exact roll. A roll that would overshoot leaves the token where it is.
@@ -67,9 +77,9 @@ Alternatively, run `npm run build` and serve **only `dist/`** from any static HT
 
 ## Chaos mode
 
-An optional mode, off by default. Pick **Game mode → Chaos** before anyone moves in a round, or after a round is won. In Refract any seated player can switch it, and everyone plays the same mode.
+An optional mode, off by default. Pick **Game mode → Chaos** in the lobby; everyone plays the same mode.
 
-Every player is dealt **three random power-ups** at the start of each round. On your turn you may play **one**, before you throw.
+Every player starts each round with **two power-ups**: one to use on a rival and one for themselves. **Rolling a 3 wins another** (up to five in hand). On your turn you may play **one**, before you throw.
 
 | Power-up | Aimed at | Effect |
 | --- | --- | --- |
@@ -83,14 +93,13 @@ Every player is dealt **three random power-ups** at the start of each round. On 
 | ⚡ Lightning | Every rival | Everyone else slides back 6 squares. |
 | 🌀 Shuffle | Everyone | All unshielded players swap squares at random. |
 
-Effects show as badges on each player's card, with how many power-ups they have left. A banner announces each power-up on every screen. Computer opponents play them too, usually on whoever is winning. The coordinator applies every power-up, so a guest cannot choose a Shuffle's result. A player who joins mid-round gets power-ups from the next round.
+Effects show as badges on each player's card, with how many power-ups they have left. A banner announces each power-up on every screen. Computer opponents play them too, usually on whoever is winning. The coordinator applies every power-up, so a guest cannot choose a Shuffle's result.
 
 ## Game behavior
 
 - First participant coordinates the shared state; only that copy accepts rolls and publishes snapshots.
 - **The coordinator throws the die for everyone.** A guest sends a roll request, never a number, so a guest cannot choose its own roll. Requests are validated against Refract’s relayed sender ID, seat, turn, round, and revision. Spectators cannot roll or request rematches.
-- First four participants occupy the seats. A later arrival takes an empty seat straight away and starts from square zero; nobody else’s progress changes.
-- When a player leaves, their token leaves the board, the turn passes on if it was theirs, and the earliest spectator takes the seat from square zero. With fewer than two players the game waits.
+- When a player leaves, their token leaves the board and the turn passes on if it was theirs. Seats are never filled mid-game; with fewer than two players left the game returns to the lobby.
 - Host departure hands coordination to the earliest remaining participant and the round carries on from that participant’s copy of the board.
 - Completed rounds offer **Next round** to any seated player. The opening seat rotates each round. Scores stay with the **seat**, including when someone new takes it. A seat change after a finished round starts the next one.
 - Late arrivals explicitly request a snapshot. A small periodic resync recovers missed messages; participants can also use **Resync game**.

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   BOARD_THEMES, LADDERS, LAST_SQUARE, SNAKES, createGame, isValidGame, nextRound, nextSeat, playRoll,
-  POWER_UPS, canChangeMode, resolveMove, resolveRoll, rollDie, seatPlayers, setMode, skipTurn, startingSeat, usePower,
+  HAND_MAX, PIECES, POWER_UPS, backToLobby, canChangeMode, choosePiece, configure, joinSeat, leaveSeat, startGame, toLobby, resolveMove, resolveRoll, rollDie, seatPlayers, setMode, skipTurn, startingSeat, usePower,
 } from '../src/game.js';
 
 const rolls = (state, dice) => dice.reduce((current, die) => playRoll(current, current.players[current.turn], die), state);
@@ -189,13 +189,17 @@ const chaos = (players = [1, 2, 3], hands) => {
 };
 const calm = { frozen: 0, banana: false, double: false, shield: false };
 
-test('chaos deals every seated player three power-ups; classic deals none', () => {
+test('chaos deals every seated player one attack and one power-up for themselves; classic deals none', () => {
   assert.deepEqual(createGame([1, 2]).hands, [[], [], [], []]);
   const state = chaos([1, 2, null, 4]);
-  assert.deepEqual(state.hands.map((hand) => hand.length), [3, 3, 0, 3]);
+  assert.deepEqual(state.hands.map((hand) => hand.length), [2, 2, 0, 2]);
   assert.ok(state.hands.flat().every((power) => POWER_UPS[power]));
+  for (const hand of [state.hands[0], state.hands[1], state.hands[3]]) {
+    assert.notEqual(POWER_UPS[hand[0]].aim, 'self');
+    assert.equal(POWER_UPS[hand[1]].aim, 'self');
+  }
   assert.ok(isValidGame(state, [1, 2, 4]));
-  assert.deepEqual(nextRound(state, first).hands.map((hand) => hand.length), [3, 3, 0, 3]);
+  assert.deepEqual(nextRound(state, first).hands.map((hand) => hand.length), [2, 2, 0, 2]);
 });
 
 test('one power-up per turn, only by the player whose turn it is, aimed at a real rival', () => {
@@ -265,7 +269,7 @@ test('the mode switches only before anyone moves or after a win, and restarts th
   assert.ok(canChangeMode(classic));
   const chaotic = setMode(classic, 'chaos', first);
   assert.equal(chaotic.mode, 'chaos');
-  assert.deepEqual(chaotic.hands.map((hand) => hand.length), [3, 3, 0, 0]);
+  assert.deepEqual(chaotic.hands.map((hand) => hand.length), [2, 2, 0, 0]);
   const moved = playRoll(chaotic, 1, 2);
   assert.equal(canChangeMode(moved), false);
   assert.equal(setMode(moved, 'classic'), moved);
@@ -290,4 +294,64 @@ test('every reachable chaos state validates', () => {
     else state = playRoll(state, state.players[state.turn], Math.floor(random() * 6) + 1);
   }
   assert.ok(state.powers > 50);
+});
+
+// ---------- Lobby ----------
+
+test('a lobby fills seats in order, picks pieces and options, and starts with two or more', () => {
+  let state = createGame([], 'classic', 'classic', first, { phase: 'lobby' });
+  assert.ok(isValidGame(state, [7, 8, 9]));
+  assert.equal(startGame(state, 7), state);
+  state = joinSeat(state, 7);
+  assert.equal(joinSeat(state, 7), state);
+  state = joinSeat(state, 9);
+  assert.deepEqual([state.players, state.pieces], [[7, 9, null, null], ['counter', 'counter', null, null]]);
+  state = choosePiece(state, 9, 'dino');
+  assert.equal(choosePiece(state, 8, 'dino'), state);
+  assert.equal(choosePiece(state, 9, 'lizard'), state);
+  state = configure(state, 7, { mode: 'chaos', turnSeconds: 30, theme: 'jungle' });
+  assert.equal(configure(state, 8, { mode: 'classic' }), state);
+  assert.equal(configure(state, 7, { turnSeconds: 31 }), state);
+  assert.ok(isValidGame(state, [7, 8, 9]));
+  assert.equal(playRoll(state, 7, 3), state);
+  state = startGame(state, 9, first);
+  assert.deepEqual([state.phase, state.pieces[1], state.turnSeconds, state.hands[0].length], ['playing', 'dino', 30, 2]);
+  assert.equal(joinSeat(state, 8), state);
+  assert.equal(choosePiece(state, 7, 'duck'), state);
+  assert.ok(isValidGame(state, [7, 8, 9]));
+  // Back to the lobby only after a win; everything on the board resets.
+  assert.equal(backToLobby(state, 7), state);
+  const won = playRoll({ ...state, positions: [94, 0, 0, 0] }, 7, 6, first);
+  const lobby = backToLobby(won, 9);
+  assert.deepEqual([lobby.phase, lobby.round, lobby.scores, lobby.hands.flat().length, lobby.pieces], ['lobby', 1, [0, 0, 0, 0], 0, ['counter', 'dino', null, null]]);
+  assert.ok(isValidGame(lobby, [7, 8, 9]));
+  const left = leaveSeat(lobby, 7);
+  assert.deepEqual([left.players, left.pieces], [[null, 9, null, null], [null, 'dino', null, null]]);
+  assert.ok(isValidGame(toLobby(won), [7, 9]));
+  assert.ok(Object.keys(PIECES).length >= 8);
+});
+
+test('validation rejects impossible lobbies, pieces and timers', () => {
+  const lobby = joinSeat(createGame([], 'classic', 'classic', first, { phase: 'lobby' }), 1);
+  for (const bad of [
+    { ...lobby, phase: 'paused' },
+    { ...lobby, turnSeconds: 4 },
+    { ...lobby, turnSeconds: 31 },
+    { ...lobby, pieces: ['dragon', null, null, null] },
+    { ...lobby, pieces: ['counter', 'duck', null, null] },
+    { ...lobby, positions: [3, 0, 0, 0] },
+    { ...lobby, hands: [['rocket'], [], [], []], mode: 'chaos' },
+  ]) assert.equal(isValidGame(bad, [1, 2]), false, JSON.stringify(bad));
+});
+
+test('in chaos, rolling a 3 adds a power-up, up to the limit', () => {
+  let state = chaos([1, 2], [['bite'], [], [], []]);
+  state = playRoll(state, 1, 3, first);
+  assert.equal(state.hands[0].length, 2);
+  assert.ok(POWER_UPS[state.lastBonus]);
+  assert.ok(isValidGame(state, [1, 2]));
+  const full = playRoll({ ...chaos([1, 2], [Array(HAND_MAX).fill('shield'), [], [], []]) }, 1, 3, first);
+  assert.deepEqual([full.hands[0].length, full.lastBonus], [HAND_MAX, null]);
+  assert.equal(playRoll(createGame([1, 2]), 1, 3).hands[0].length, 0);
+  assert.equal(playRoll(state, 2, 2).lastBonus, null);
 });

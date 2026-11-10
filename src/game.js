@@ -27,7 +27,33 @@ export const POWER_UPS = Object.freeze({
   shuffle: { name: 'Shuffle', icon: '🌀', aim: 'all', blurb: 'Everyone swaps squares at random.' },
 });
 const POWER_IDS = Object.freeze(Object.keys(POWER_UPS));
-export const HAND_SIZE = 3;
+// Chaos hands start with one power-up for yourself and one to use on others; every
+// roll of a 3 adds another, up to HAND_MAX.
+export const HAND_SIZE = 2;
+export const HAND_MAX = 5;
+const BONUS_ROLL = 3;
+const SELF_POWERS = Object.freeze(Object.keys(POWER_UPS).filter((id) => POWER_UPS[id].aim === 'self'));
+const ATTACK_POWERS = Object.freeze(Object.keys(POWER_UPS).filter((id) => POWER_UPS[id].aim !== 'self'));
+
+// Playing pieces. 'counter' is the plain numbered counter; the rest are a little sillier.
+export const PIECES = Object.freeze({
+  counter: { name: 'Counter', icon: null },
+  duck: { name: 'Duck', icon: '🦆' },
+  dino: { name: 'Dino', icon: '🦖' },
+  ufo: { name: 'UFO', icon: '🛸' },
+  pizza: { name: 'Pizza', icon: '🍕' },
+  ghost: { name: 'Ghost', icon: '👻' },
+  octopus: { name: 'Octopus', icon: '🐙' },
+  robot: { name: 'Robot', icon: '🤖' },
+  cheese: { name: 'Cheese', icon: '🧀' },
+  crown: { name: 'Crown', icon: '👑' },
+});
+const PIECE_IDS = Object.freeze(Object.keys(PIECES));
+// How long each player has to throw, in seconds.
+export const TURN_SECONDS = Object.freeze({ min: 5, max: 30, standard: 15 });
+const isTurnSeconds = (value) => Number.isInteger(value) && value >= TURN_SECONDS.min && value <= TURN_SECONDS.max;
+// 'lobby' while people join and pick options; 'playing' once the game starts.
+export const PHASES = Object.freeze(['lobby', 'playing']);
 const ROCKET_SQUARES = 8;
 const BITE_SQUARES = 10;
 const LIGHTNING_SQUARES = 6;
@@ -64,19 +90,26 @@ export function startingSeat(round, players) {
   return players[preferred] !== null ? preferred : nextSeat(players, preferred);
 }
 
-/** A fresh hand of power-ups for every seated player (Chaos mode only). */
+const pick = (list, random) => list[Math.floor(random() * list.length) % list.length];
+
+/** A fresh hand for every seated player (Chaos mode only): one attack, one for yourself. */
 function deal(players, mode, random) {
   return SEATS.map((seat) => (mode === 'chaos' && players[seat] !== null
-    ? Array.from({ length: HAND_SIZE }, () => POWER_IDS[Math.floor(random() * POWER_IDS.length) % POWER_IDS.length])
+    ? [pick(ATTACK_POWERS, random), pick(SELF_POWERS, random)]
     : []));
 }
 
-export function createGame(players = [1, 2], theme = 'classic', mode = 'classic', random = Math.random) {
+export function createGame(players = [1, 2], theme = 'classic', mode = 'classic', random = Math.random,
+  { phase = 'playing', turnSeconds = TURN_SECONDS.standard, pieces } = {}) {
   const seats = seatList(players);
   const chosen = GAME_MODES.includes(mode) ? mode : 'classic';
+  const lobby = phase === 'lobby';
   return {
+    phase: lobby ? 'lobby' : 'playing',
     theme: boardTheme(theme),
     mode: chosen,
+    turnSeconds: isTurnSeconds(turnSeconds) ? turnSeconds : TURN_SECONDS.standard,
+    pieces: seats.map((id, seat) => (id === null ? null : PIECE_IDS.includes(pieces?.[seat]) ? pieces[seat] : 'counter')),
     positions: [0, 0, 0, 0],
     players: seats,
     turn: startingSeat(1, seats),
@@ -96,11 +129,13 @@ export function createGame(players = [1, 2], theme = 'classic', mode = 'classic'
     lastFrozen: [],
     // Chaos mode: each seat's power-ups and lingering effects, whether this turn's
     // power-up has been used, and the last power-up played.
-    hands: deal(seats, chosen, random),
+    hands: lobby ? SEATS.map(() => []) : deal(seats, chosen, random),
     effects: calmAll(),
     powerUsed: false,
     powers: 0,
     lastPower: null,
+    // A power-up won by rolling a 3, for the message.
+    lastBonus: null,
     revision: 0,
   };
 }
@@ -141,8 +176,8 @@ function passTurn(state, seat, effects) {
   return { turn: next, missed };
 }
 
-export function playRoll(state, playerId, die) {
-  if (state.winner !== null || !Number.isInteger(die) || die < 1 || die > 6 ||
+export function playRoll(state, playerId, die, random = Math.random) {
+  if (state.phase !== 'playing' || state.winner !== null || !Number.isInteger(die) || die < 1 || die > 6 ||
       playerId === null || playerId === undefined || state.players[state.turn] !== playerId) return state;
 
   const seat = state.turn;
@@ -161,6 +196,13 @@ export function playRoll(state, playerId, die) {
   if (won) scores[seat] += 1;
   // A six earns another roll.
   const passed = won || die === 6 ? { turn: seat, missed: [] } : passTurn(state, seat, effects);
+  // Chaos: rolling a 3 wins another power-up.
+  let hands = state.hands;
+  let lastBonus = null;
+  if (state.mode === 'chaos' && die === BONUS_ROLL && !won && state.hands[seat].length < HAND_MAX) {
+    lastBonus = pick(POWER_IDS, random);
+    hands = state.hands.map((hand, index) => (index === seat ? [...hand, lastBonus] : hand));
+  }
   return {
     ...state,
     positions,
@@ -172,6 +214,8 @@ export function playRoll(state, playerId, die) {
     lastEvent: 'roll',
     lastFrozen: passed.missed,
     effects,
+    hands,
+    lastBonus,
     powerUsed: false,
     rolls: state.rolls + 1,
     revision: state.revision + 1,
@@ -193,6 +237,7 @@ export function nextRound(state, random = Math.random) {
     effects: calmAll(),
     powerUsed: false,
     lastPower: null,
+    lastBonus: null,
     round,
     revision: state.revision + 1,
   };
@@ -200,7 +245,7 @@ export function nextRound(state, random = Math.random) {
 
 /** The player whose turn it is ran out of time: the turn passes to the next seat. */
 export function skipTurn(state) {
-  if (state.winner !== null || state.players[state.turn] === null) return state;
+  if (state.phase !== 'playing' || state.winner !== null || state.players[state.turn] === null) return state;
   const effects = state.effects.map((effect) => ({ ...effect }));
   const passed = passTurn(state, state.turn, effects);
   if (passed.turn === state.turn) return state;
@@ -209,6 +254,7 @@ export function skipTurn(state) {
     turn: passed.turn,
     lastSkip: state.turn,
     lastEvent: 'skip',
+    lastBonus: null,
     lastFrozen: passed.missed,
     effects,
     powerUsed: false,
@@ -238,8 +284,100 @@ export function setMode(state, mode, random = Math.random) {
     effects: calmAll(),
     powerUsed: false,
     lastPower: null,
+    lastBonus: null,
     revision: state.revision + 1,
   };
+}
+
+// ---------- Lobby ----------
+const seatOf = (state, id) => (id === null || id === undefined ? -1 : state.players.indexOf(id));
+
+/** Take the first free seat, with the plain counter until a piece is picked. Lobby only. */
+export function joinSeat(state, id) {
+  if (state.phase !== 'lobby' || !Number.isSafeInteger(id) || id < 0 || seatOf(state, id) >= 0) return state;
+  const seat = state.players.indexOf(null);
+  if (seat < 0) return state;
+  return {
+    ...state,
+    players: state.players.map((player, index) => (index === seat ? id : player)),
+    pieces: state.pieces.map((piece, index) => (index === seat ? 'counter' : piece)),
+    revision: state.revision + 1,
+  };
+}
+
+/** Give up a seat to spectate instead. Lobby only. */
+export function leaveSeat(state, id) {
+  const seat = seatOf(state, id);
+  if (state.phase !== 'lobby' || seat < 0) return state;
+  return {
+    ...state,
+    players: state.players.map((player, index) => (index === seat ? null : player)),
+    pieces: state.pieces.map((piece, index) => (index === seat ? null : piece)),
+    scores: state.scores.map((score, index) => (index === seat ? 0 : score)),
+    revision: state.revision + 1,
+  };
+}
+
+/** Pick a playing piece. Lobby only. */
+export function choosePiece(state, id, piece) {
+  const seat = seatOf(state, id);
+  if (state.phase !== 'lobby' || seat < 0 || !PIECE_IDS.includes(piece) || state.pieces[seat] === piece) return state;
+  return { ...state, pieces: state.pieces.map((current, index) => (index === seat ? piece : current)), revision: state.revision + 1 };
+}
+
+/** Change the game options. Any seated player, lobby only. */
+export function configure(state, id, { mode, turnSeconds, theme } = {}) {
+  if (state.phase !== 'lobby' || seatOf(state, id) < 0) return state;
+  const next = {
+    mode: GAME_MODES.includes(mode) ? mode : state.mode,
+    turnSeconds: isTurnSeconds(turnSeconds) ? turnSeconds : state.turnSeconds,
+    theme: BOARD_THEMES.includes(theme) ? theme : state.theme,
+  };
+  if (next.mode === state.mode && next.turnSeconds === state.turnSeconds && next.theme === state.theme) return state;
+  return { ...state, ...next, revision: state.revision + 1 };
+}
+
+/** Start the game with whoever is seated. Needs two players. */
+export function startGame(state, id, random = Math.random) {
+  if (state.phase !== 'lobby' || seatOf(state, id) < 0 || state.players.filter((player) => player !== null).length < 2) return state;
+  return {
+    ...state,
+    phase: 'playing',
+    positions: [0, 0, 0, 0],
+    turn: startingSeat(state.round, state.players),
+    winner: null,
+    hands: deal(state.players, state.mode, random),
+    effects: calmAll(),
+    revision: state.revision + 1,
+  };
+}
+
+/** Back to the lobby for a new game: seats, pieces, and options stay; the board and scores reset. */
+export function toLobby(state) {
+  return {
+    ...state,
+    phase: 'lobby',
+    positions: [0, 0, 0, 0],
+    winner: null,
+    round: 1,
+    scores: [0, 0, 0, 0],
+    lastRoll: null,
+    lastSkip: null,
+    lastEvent: null,
+    lastFrozen: [],
+    hands: SEATS.map(() => []),
+    effects: calmAll(),
+    powerUsed: false,
+    lastPower: null,
+    lastBonus: null,
+    revision: state.revision + 1,
+  };
+}
+
+/** A seated player can take everyone back to the lobby once a round is won. */
+export function backToLobby(state, id) {
+  if (state.phase !== 'playing' || state.winner === null || seatOf(state, id) < 0) return state;
+  return toLobby(state);
 }
 
 /**
@@ -248,7 +386,7 @@ export function setMode(state, mode, random = Math.random) {
  */
 export function usePower(state, playerId, slot, target = null, random = Math.random) {
   const seat = state.turn;
-  if (state.mode !== 'chaos' || state.winner !== null || state.powerUsed || playerId === null || playerId === undefined ||
+  if (state.phase !== 'playing' || state.mode !== 'chaos' || state.winner !== null || state.powerUsed || playerId === null || playerId === undefined ||
       state.players[seat] !== playerId || !Number.isInteger(slot)) return state;
   const power = state.hands[seat][slot];
   if (!power) return state;
@@ -310,6 +448,7 @@ export function usePower(state, playerId, slot, target = null, random = Math.ran
     powers: state.powers + 1,
     lastPower: { seat, power, target: aim === 'other' ? target : null, blocked, moves },
     lastEvent: 'power',
+    lastBonus: null,
     revision: state.revision + 1,
   };
 }
@@ -323,10 +462,13 @@ export function seatPlayers(state, players, random = Math.random) {
   const seats = seatList(players);
   const changed = SEATS.map((seat) => seats[seat] !== state.players[seat]);
   if (!changed.some(Boolean)) return state;
-  if (state.winner !== null) return nextRound({ ...state, players: seats }, random);
+  const pieces = state.pieces.map((piece, seat) => (seats[seat] === null ? null : changed[seat] ? 'counter' : piece));
+  if (state.phase === 'lobby') return { ...state, players: seats, pieces, scores: state.scores.map((score, seat) => (changed[seat] ? 0 : score)), revision: state.revision + 1 };
+  if (state.winner !== null) return nextRound({ ...state, players: seats, pieces }, random);
   return {
     ...state,
     players: seats,
+    pieces,
     positions: state.positions.map((position, seat) => (changed[seat] ? 0 : position)),
     turn: seats[state.turn] === null ? nextSeat(seats, state.turn) : state.turn,
     lastRoll: state.lastRoll && changed[state.lastRoll.seat] ? null : state.lastRoll,
@@ -353,7 +495,14 @@ const isSquare = (value) => Number.isInteger(value) && value >= 0 && value <= LA
 export function isValidGame(state, memberIds) {
   if (!state || typeof state !== 'object') return false;
   const { positions, players, scores, turn, winner, lastRoll, round, revision, mode, hands, effects, lastPower } = state;
-  if (!BOARD_THEMES.includes(state.theme) || !GAME_MODES.includes(mode)) return false;
+  if (!BOARD_THEMES.includes(state.theme) || !GAME_MODES.includes(mode) || !PHASES.includes(state.phase) || !isTurnSeconds(state.turnSeconds)) return false;
+  if (!Array.isArray(state.pieces) || state.pieces.length !== MAX_PLAYERS ||
+      !state.pieces.every((piece, seat) => (state.players?.[seat] === null ? piece === null : PIECE_IDS.includes(piece)))) return false;
+  if (state.lastBonus !== null && (!POWER_IDS.includes(state.lastBonus) || mode !== 'chaos' || state.lastEvent !== 'roll' || lastRoll?.die !== BONUS_ROLL)) return false;
+  // Nothing has happened on the board while people are still in the lobby.
+  if (state.phase === 'lobby' && (state.positions?.some?.((square) => square !== 0) || winner !== null || lastRoll !== null ||
+      lastPower !== null || state.lastSkip !== null || state.lastEvent !== null || state.powerUsed ||
+      state.hands?.some?.((hand) => hand.length))) return false;
   if (!Number.isSafeInteger(state.rolls) || state.rolls < 0 || state.rolls > revision || (lastRoll !== null && state.rolls < 1)) return false;
   if (!Number.isSafeInteger(state.skips) || state.skips < 0 || state.skips > revision) return false;
   if (!Number.isSafeInteger(state.powers) || state.powers < 0 || state.powers > revision) return false;
@@ -368,8 +517,7 @@ export function isValidGame(state, memberIds) {
   const seatedIds = players.filter((id) => id !== null);
   if (!seatedIds.every((id) => Number.isSafeInteger(id) && id >= 0 && (!memberIds || memberIds.includes(id)))) return false;
   if (new Set(seatedIds).size !== seatedIds.length) return false;
-  if (memberIds && seatedIds.length !== Math.min(MAX_PLAYERS, memberIds.length)) return false;
-  if (seatedIds.length && players[turn] === null) return false;
+  if (state.phase === 'playing' && seatedIds.length && players[turn] === null) return false;
 
   for (const seat of SEATS) {
     const position = positions[seat];
@@ -379,7 +527,7 @@ export function isValidGame(state, memberIds) {
     if (players[seat] === null && position !== 0) return false;
     if (!Number.isSafeInteger(scores[seat]) || scores[seat] < 0) return false;
     const hand = hands[seat];
-    if (!Array.isArray(hand) || hand.length > HAND_SIZE || !hand.every((power) => POWER_IDS.includes(power))) return false;
+    if (!Array.isArray(hand) || hand.length > HAND_MAX || !hand.every((power) => POWER_IDS.includes(power))) return false;
     if (!isEffect(effects[seat])) return false;
     // Classic games, and empty seats, carry no power-ups or effects.
     if ((mode === 'classic' || players[seat] === null) &&

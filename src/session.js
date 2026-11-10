@@ -1,4 +1,7 @@
-import { BOARD_THEMES, GAME_MODES, MAX_PLAYERS, createGame, isValidGame, nextRound, playRoll, rollDie as fairDie, seatPlayers, setMode as switchMode, skipTurn, usePower } from './game.js';
+import {
+  BOARD_THEMES, backToLobby, choosePiece, configure, createGame, isValidGame, joinSeat, leaveSeat, nextRound, playRoll,
+  rollDie as fairDie, seatPlayers, skipTurn, startGame, toLobby, usePower,
+} from './game.js';
 
 export const GAME_PROTOCOL = 'refract-snakes-and-ladders/1';
 
@@ -30,9 +33,12 @@ function browserStorage() {
 // The host takes at most one theme change per second, so rapid switching cannot flood the
 // relay (Refract allows about 20 messages a second) and drown out the rolls.
 export const THEME_COOLDOWN_MS = 1000;
+// Lobby option changes are limited the same way, a little more loosely.
+export const OPTIONS_COOLDOWN_MS = 250;
 
-// Each player has TURN_MS to throw. After a roll the clock waits TURN_SETTLE_MS for the
-// previous throw to land, and the host allows TURN_GRACE_MS for a throw already on its way.
+// The default turn length (the lobby sets the real one, in seconds). After a roll the clock
+// waits TURN_SETTLE_MS for the previous throw to land, and the host allows TURN_GRACE_MS for
+// a throw already on its way.
 export const TURN_MS = 15000;
 export const TURN_SETTLE_MS = 3000;
 export const TURN_GRACE_MS = 1500;
@@ -44,14 +50,19 @@ function defaultTimer(run, ms) {
   return timer;
 }
 
+// Requests that change the game, and so go to the host.
+const LOBBY_ACTIONS = ['join', 'spectate', 'piece', 'options', 'start'];
+const GAME_ACTIONS = ['roll', 'rematch', 'power', 'lobby'];
+
 export function createSession({
   send, onChange, storage = browserStorage(), rollDie = fairDie, theme: preferredTheme = 'classic',
   now = () => Date.now(), setTimer = defaultTimer, clearTimer = (timer) => clearTimeout(timer),
   // Deals power-ups and shuffles squares. Only the host's matters.
   random = Math.random,
 }) {
-  // A new game starts on this viewer's preferred board; the host's copy wins once connected.
-  let state = createGame([], preferredTheme);
+  // Every new game opens in the lobby, on this viewer's preferred board; the host's copy wins.
+  const freshLobby = () => createGame([], preferredTheme, 'classic', random, { phase: 'lobby' });
+  let state = freshLobby();
   let self = null;
   let participants = [];
   let earlyParticipants = null;
@@ -63,7 +74,7 @@ export function createSession({
   let acceptedHostId = null;
   let pendingSync = null;
   let lastThemeAt = -Infinity;
-  let lastModeAt = -Infinity;
+  let lastOptionsAt = -Infinity;
   let turnTimer = null;
   let turnKey = null;
   let timedRolls = null;
@@ -71,8 +82,9 @@ export function createSession({
   const ids = () => participants.map((person) => person.id);
   const isHost = () => self !== null && self.id === hostId;
   const isMember = (id) => participants.some((person) => person.id === id);
-  const seated = (id) => id !== null && state.players.includes(id);
-  const enoughPlayers = () => state.players.filter((id) => id !== null).length >= 2;
+  const seated = (id) => id !== null && id !== undefined && state.players.includes(id);
+  const seatedCount = () => state.players.filter((id) => id !== null).length;
+  const playing = () => state.phase === 'playing';
   const storageKey = () => `${GAME_PROTOCOL}:${JSON.stringify([sessionId, self?.id])}`;
 
   function persist() {
@@ -82,37 +94,45 @@ export function createSession({
     } catch { /* A disabled or full browser store must not prevent live play. */ }
   }
 
-  // People keep their seats; the earliest unseated participants fill empty ones.
-  function assignSeats() {
+  /**
+   * Seats belong to the people who took them. Someone who leaves the activity gives up
+   * their seat (and their token leaves the board); a game left with fewer than two
+   * players goes back to the lobby. Nobody is seated automatically.
+   */
+  function dropDeparted() {
     const members = ids();
     const players = state.players.map((id) => (members.includes(id) ? id : null));
-    for (let seat = 0; seat < MAX_PLAYERS; seat += 1) {
-      if (players[seat] === null) players[seat] = members.find((id) => !players.includes(id)) ?? null;
+    const before = state;
+    state = seatPlayers(state, players, random);
+    if (playing() && seatedCount() < 2) {
+      state = toLobby(state);
+      return 'Not enough players were left, so the game went back to the lobby.';
     }
-    return players;
+    return state !== before ? 'A player left the game.' : '';
   }
 
   function restore() {
     if (!storage) return;
     try {
       const raw = storage.getItem(storageKey());
-      if (!raw || raw.length > 10000) return;
+      if (!raw || raw.length > 12000) return;
       const saved = JSON.parse(raw);
       if (!Array.isArray(saved.members) || !saved.members.every(validId) || saved.hostId !== saved.members[0] ||
           new Set(saved.members).size !== saved.members.length || !isValidGame(saved.state, saved.members)) return;
       const fresh = state;
       state = saved.state;
       if (isHost()) {
-        state = seatPlayers(state, assignSeats(), random);
+        dropDeparted();
         if (!isValidGame(state, ids())) state = fresh;
       }
     } catch { /* Ignore invalid or unavailable saved state. */ }
   }
 
-  // Only the host keeps time. A new turn (a roll, a skip, a new round, or a new player in
-  // the seat) restarts the clock; theme changes do not.
+  // Only the host keeps time, and only during a game. A new turn (a roll, a skip, a new
+  // round, or a change of seats) restarts the clock; theme changes and power-ups do not.
   function armTurnTimer() {
-    const active = !destroyed && connected && isHost() && enoughPlayers() && state.winner === null && state.players[state.turn] !== null;
+    const active = !destroyed && connected && isHost() && playing() && seatedCount() >= 2 &&
+      state.winner === null && state.players[state.turn] !== null;
     const key = active ? JSON.stringify([state.round, state.rolls, state.skips, state.turn, state.players]) : null;
     if (key === turnKey) return;
     if (turnTimer !== null) clearTimer(turnTimer);
@@ -130,7 +150,7 @@ export function createSession({
       notice = '';
       emit();
       snapshot();
-    }, (afterRoll ? TURN_SETTLE_MS : 0) + TURN_MS + TURN_GRACE_MS);
+    }, (afterRoll ? TURN_SETTLE_MS : 0) + state.turnSeconds * 1000 + TURN_GRACE_MS);
   }
 
   function emit() {
@@ -156,7 +176,7 @@ export function createSession({
   function restingNotice() {
     if (!self || !isMember(self.id)) return 'You are no longer in this activity.';
     if (!connected) return 'Synchronizing the game…';
-    if (!enoughPlayers()) return 'Waiting for another player to join.';
+    if (playing() && !seated(self.id)) return 'A game is underway, so you’re spectating. Join the next one from the lobby.';
     return '';
   }
 
@@ -181,13 +201,10 @@ export function createSession({
     }
 
     if (isHost()) {
-      // The game carries on through arrivals, departures, and a change of host:
-      // a newcomer starts from square zero and a departed token leaves the board.
-      const reseated = seatPlayers(state, assignSeats(), random);
-      const seatsChanged = reseated !== state;
-      state = reseated;
-      if (leadershipChanged && oldHost !== null) notice = 'The host left. The game carries on from here.';
-      else notice = seatsChanged ? 'Player seats updated.' : '';
+      // The game carries on through arrivals, departures, and a change of host.
+      const departed = dropDeparted();
+      if (leadershipChanged && oldHost !== null) notice = departed || 'The host left. The game carries on from here.';
+      else notice = departed;
       connected = true;
       acceptedHostId = hostId;
       notice = restingNotice() || notice;
@@ -220,7 +237,7 @@ export function createSession({
     self = normalizePeople([message.self])[0];
     participants = nextParticipants;
     hostId = participants[0]?.id ?? null;
-    state = createGame(ids().slice(0, MAX_PLAYERS), preferredTheme);
+    state = freshLobby();
     restore();
     acceptedHostId = isHost() ? hostId : null;
     connected = isHost();
@@ -243,33 +260,41 @@ export function createSession({
     }
   }
 
+  /** The host applies a request from `from`, or refuses it. Every rule lives in game.js. */
   function applyAction(from, data) {
-    // Theme and seat updates move the revision, so they must not void a roll request in flight.
-    // The roll count still stops a duplicate or stale request from rolling twice.
-    if (!seated(from) || !enoughPlayers() || data.round !== state.round) return false;
-    if (data.kind === 'roll') {
-      if (data.rolls !== state.rolls) return false;
-      // Only the coordinator throws the die, so a guest cannot choose its own roll.
-      if (state.winner !== null || state.players[state.turn] !== from) return false;
-      const next = playRoll(state, from, rollDie());
-      if (next === state) return false;
-      state = next;
-    } else if (data.kind === 'rematch' && state.winner !== null) {
-      state = nextRound(state, random);
-    } else if (data.kind === 'power') {
-      // One power-up per turn: the power count stops a duplicate request playing twice.
-      if (data.powers !== state.powers || data.rolls !== state.rolls) return false;
-      const next = usePower(state, from, data.slot, data.target ?? null, random);
-      if (next === state) return false;
-      state = next;
-    } else if (data.kind === 'mode') {
-      if (now() - lastModeAt < THEME_COOLDOWN_MS) return false;
-      const next = switchMode(state, data.mode, random);
-      if (next === state) return false;
-      lastModeAt = now();
-      state = next;
-    } else return false;
-    notice = '';
+    let next = state;
+    switch (data.kind) {
+      case 'join': next = joinSeat(state, from); break;
+      case 'spectate': next = leaveSeat(state, from); break;
+      case 'piece': next = choosePiece(state, from, data.piece); break;
+      case 'options':
+        if (now() - lastOptionsAt < OPTIONS_COOLDOWN_MS || !data.options || typeof data.options !== 'object') return false;
+        next = configure(state, from, data.options);
+        if (next !== state) lastOptionsAt = now();
+        break;
+      case 'start': next = startGame(state, from, random); break;
+      case 'lobby': next = backToLobby(state, from); break;
+      default: {
+        // Theme and seat updates move the revision, so they must not void a roll request in flight.
+        // The roll count still stops a duplicate or stale request from rolling twice.
+        if (!playing() || !seated(from) || seatedCount() < 2 || data.round !== state.round) return false;
+        if (data.kind === 'roll') {
+          if (data.rolls !== state.rolls) return false;
+          // Only the coordinator throws the die, so a guest cannot choose its own roll.
+          if (state.winner !== null || state.players[state.turn] !== from) return false;
+          next = playRoll(state, from, rollDie(), random);
+        } else if (data.kind === 'rematch' && state.winner !== null) {
+          next = nextRound(state, random);
+        } else if (data.kind === 'power') {
+          // One power-up per turn: the power count stops a duplicate request playing twice.
+          if (data.powers !== state.powers || data.rolls !== state.rolls) return false;
+          next = usePower(state, from, data.slot, data.target ?? null, random);
+        }
+      }
+    }
+    if (next === state) return false;
+    state = next;
+    notice = restingNotice();
     emit();
     snapshot();
     return true;
@@ -315,35 +340,33 @@ export function createSession({
       if (typeof data.theme === 'string' && BOARD_THEMES.includes(data.theme) && data.theme !== state.theme) applyTheme(data.theme);
       return;
     }
-    if (isHost() && ['roll', 'rematch', 'power', 'mode'].includes(data.kind)) {
+    if (isHost() && (LOBBY_ACTIONS.includes(data.kind) || GAME_ACTIONS.includes(data.kind))) {
       if (!applyAction(from, data)) snapshot([from]);
     }
   }
 
-  function action(kind, extra = {}) {
+  function request(kind, data = {}) {
     if (destroyed || !self || !connected || !isMember(self.id)) return;
+    const packet = { kind, ...data };
+    if (isHost()) applyAction(self.id, packet);
+    else transmit(kind, packet, [hostId]);
+  }
+
+  function action(kind, extra = {}) {
+    if (destroyed || !self || !connected || !isMember(self.id) || !playing()) return;
     if (!seated(self.id)) {
-      notice = 'You are watching. A seat opens when a player leaves.';
-      emit();
-      return;
-    }
-    if (!enoughPlayers()) {
-      notice = 'Waiting for another player to join.';
+      notice = 'You’re spectating this game. Join the next one from the lobby.';
       emit();
       return;
     }
     if (kind === 'roll' && (state.winner !== null || state.players[state.turn] !== self.id)) return;
-    if (kind === 'rematch' && state.winner === null) return;
+    if ((kind === 'rematch' || kind === 'lobby') && state.winner === null) return;
     if (kind === 'power' && (state.mode !== 'chaos' || state.powerUsed || state.players[state.turn] !== self.id)) return;
-    if (kind === 'mode' && (!GAME_MODES.includes(extra.mode) || extra.mode === state.mode)) return;
-    const data = {
-      kind, round: state.round,
+    request(kind, {
+      round: state.round,
       ...(kind === 'roll' || kind === 'power' ? { rolls: state.rolls } : {}),
       ...(kind === 'power' ? { powers: state.powers, slot: extra.slot, target: extra.target ?? null } : {}),
-      ...(kind === 'mode' ? { mode: extra.mode } : {}),
-    };
-    if (isHost()) applyAction(self.id, data);
-    else transmit(kind, data, [hostId]);
+    });
   }
 
   function setTheme(theme) {
@@ -352,17 +375,25 @@ export function createSession({
     else transmit('theme', { theme }, [hostId]);
   }
 
+  const inLobby = (run) => (...args) => { if (state.phase === 'lobby') run(...args); };
+
   return {
     init,
     setTheme,
     setParticipants: updateRoster,
     receive,
+    // Lobby: take a seat or spectate, pick a piece, set the options, and start.
+    join: inLobby(() => { if (!seated(self?.id)) request('join'); }),
+    spectate: inLobby(() => { if (seated(self?.id)) request('spectate'); }),
+    choosePiece: inLobby((piece) => request('piece', { piece })),
+    setOptions: inLobby((options) => request('options', { options })),
+    start: inLobby(() => request('start')),
+    // Game.
     roll: () => action('roll'),
     rematch: () => action('rematch'),
+    backToLobby: () => action('lobby'),
     // Chaos mode: play the power-up in a hand slot, aimed at a seat when it needs one.
     usePower: (slot, target = null) => action('power', { slot, target }),
-    // Any seated player may switch modes before anyone moves, or between rounds.
-    setMode: (mode) => action('mode', { mode }),
     sync,
     destroy() {
       destroyed = true;

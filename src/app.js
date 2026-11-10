@@ -1,5 +1,8 @@
-import { BOARD_THEMES, LADDERS, LAST_SQUARE, POWER_UPS, SEATS, SNAKES, boardTheme, canChangeMode, createGame, setMode, skipTurn, usePower, nextRound, playRoll, rollDie } from './game.js';
-import { THEME_COOLDOWN_MS, TURN_MS, TURN_SETTLE_MS, createSession } from './session.js';
+import {
+  BOARD_THEMES, LADDERS, LAST_SQUARE, PIECES, POWER_UPS, SEATS, SNAKES, TURN_SECONDS, boardTheme, choosePiece, configure,
+  createGame, nextRound, playRoll, rollDie, skipTurn, startGame, toLobby, usePower,
+} from './game.js';
+import { THEME_COOLDOWN_MS, TURN_SETTLE_MS, createSession } from './session.js';
 import { connectActivity } from './bridge.js';
 
 const $ = (id) => document.getElementById(id);
@@ -16,6 +19,15 @@ function savedBoardTheme() {
 function saveBoardTheme(theme) {
   try { localStorage.setItem(THEME_KEY, theme); } catch { /* The choice simply is not remembered. */ }
 }
+// The piece this viewer last picked, offered again in each lobby.
+const PIECE_KEY = 'refract-snakes-and-ladders:piece';
+let savedPiece = 'counter';
+try { const stored = localStorage.getItem(PIECE_KEY); if (PIECES[stored]) savedPiece = stored; } catch { /* Defaults to the counter. */ }
+function savePiece(piece) {
+  savedPiece = piece;
+  try { localStorage.setItem(PIECE_KEY, piece); } catch { /* The choice simply is not remembered. */ }
+}
+
 // Calm effects: a per-viewer switch that stops flashing, twinkling, and flickering.
 const CALM_KEY = 'refract-snakes-and-ladders:calm-effects';
 let calmEffects = false;
@@ -69,7 +81,8 @@ let mode = 'computer';
 // Classic or Chaos, for local practice. In Refract the game state carries the mode.
 let gameMode = 'classic';
 let playerCount = 2;
-let localState = createGame(localPlayers(), savedBoardTheme());
+let localSeconds = TURN_SECONDS.standard;
+let localState = localLobby(savedBoardTheme());
 let liveView = null;
 let bridge = null;
 let computerTimer = null;
@@ -94,13 +107,15 @@ let rollSeat = null;
 // The big die is a small physics body: 'ready' waiting in the middle of the screen,
 // 'held' on a spring under the pointer, 'flying' free across the screen, 'rest' once
 // it has landed, and 'away' when it is not shown.
-const die = { mode: 'away', x: 0, y: 0, vx: 0, vy: 0, angle: 0, spin: 0, px: 0, py: 0, grabX: 0, grabY: 0, pointer: null, travelled: 0, value: null, started: 0, last: 0 };
+const die = { mode: 'away', x: 0, y: 0, vx: 0, vy: 0, angle: 0, spin: 0, rx: 0, ry: 0, px: 0, py: 0, grabX: 0, grabY: 0, pointer: null, travelled: 0, value: null, started: 0, last: 0 };
 const inHand = () => die.mode === 'ready' || die.mode === 'held';
 const overlay = $('throw');
 const bigDie = $('big-die');
+const cube = $('cube');
 
 document.body.classList.toggle('embedded', embedded);
-$('local-modes').hidden = embedded;
+$('practice-options').hidden = embedded;
+$('lobby-you').hidden = !embedded;
 $('refract-info').hidden = !embedded;
 // Reloading a connected activity must not silently switch it into local play.
 if (embedded) {
@@ -111,6 +126,15 @@ if (embedded) {
 function localPlayers() {
   return SEATS.map((seat) => (seat < playerCount ? seat + 1 : null));
 }
+
+/** A practice lobby: you in seat one, then computers (or friends at this screen) with silly pieces. */
+function localLobby(theme = localState?.theme ?? 'classic') {
+  const others = Object.keys(PIECES).filter((piece) => piece !== 'counter' && piece !== savedPiece).sort(() => Math.random() - 0.5);
+  const pieces = SEATS.map((seat) => (seat === 0 ? savedPiece : mode === 'computer' ? others[seat - 1] : 'counter'));
+  return createGame(localPlayers(), theme, gameMode, Math.random, { phase: 'lobby', turnSeconds: localSeconds, pieces });
+}
+
+const pieceIcon = (state, seat) => PIECES[state.pieces?.[seat]]?.icon ?? null;
 
 /** Centre of a square as a percentage of the board; square 1 is bottom-left and rows alternate direction. */
 function centre(square) {
@@ -314,10 +338,7 @@ for (const button of themeButtons) {
     themeRestUntil = Date.now() + THEME_COOLDOWN_MS;
     setTimeout(render, THEME_COOLDOWN_MS + 20);
     if (embedded) session.setTheme(theme);
-    else {
-      localState = { ...localState, theme };
-      render();
-    }
+    else setOption({ theme });
   });
 }
 
@@ -348,6 +369,7 @@ function describeRoll(state, mine) {
   else if (roll.to === LAST_SQUARE) text += ' and reached 100.';
   else text += ` and moved to ${roll.to}.`;
   if (roll.die === 6 && state.winner === null) text += ' A six: roll again.';
+  if (state.lastBonus) text += ` A 3 wins a power-up: ${POWER_UPS[state.lastBonus].icon} ${POWER_UPS[state.lastBonus].name}.`;
   return text + frozenNote(state);
 }
 
@@ -390,13 +412,21 @@ const launchSpeed = () => Math.max(window.innerWidth, window.innerHeight) * 2.6;
 
 function drawDie() {
   const half = bigDie.offsetWidth / 2;
-  bigDie.style.transform = `translate(${(die.x - half).toFixed(1)}px, ${(die.y - half).toFixed(1)}px) rotate(${die.angle.toFixed(1)}deg)`;
+  bigDie.style.transform = `translate(${(die.x - half).toFixed(1)}px, ${(die.y - half).toFixed(1)}px)`;
+  // Spin flat on the table (z), and tumble over and over (x and y) as it travels.
+  cube.style.transform = `rotateZ(${die.angle.toFixed(1)}deg) rotateX(${die.rx.toFixed(1)}deg) rotateY(${die.ry.toFixed(1)}deg)`;
 }
 
-function rattle() {
-  // A die rapidly changing faces flickers; calm effects keep one face until it lands.
-  if (calmEffects) return;
-  bigDie.dataset.value = String((Number(bigDie.dataset.value) + Math.floor(Math.random() * 5)) % 6 + 1);
+// The cube's x and y turn that brings each face to the top. Opposite faces add up to 7.
+const FACE_TURNS = { 1: [0, 0], 2: [-90, 0], 3: [0, -90], 4: [0, 90], 5: [90, 0], 6: [0, 180] };
+const nearestTurn = (target, current) => target + 360 * Math.round((current - target) / 360);
+
+/** Turn the cube, from wherever it is, to rest flat on `value`. */
+function faceUp(value) {
+  const [rx, ry] = FACE_TURNS[value] ?? FACE_TURNS[1];
+  die.rx = nearestTurn(rx, die.rx);
+  die.ry = nearestTurn(ry, die.ry);
+  die.angle = Math.round(die.angle / 90) * 90;
 }
 
 function showDie(seat) {
@@ -406,6 +436,7 @@ function showDie(seat) {
   overlay.classList.remove('landed');
   overlay.classList.add('show');
   bigDie.style.transition = 'none';
+  cube.style.transition = 'none';
 }
 
 function putAway() {
@@ -423,10 +454,9 @@ function landDie() {
   die.mode = 'rest';
   cancelAnimationFrame(frame);
   frame = null;
-  bigDie.dataset.value = String(die.value);
-  // Settle flat on the nearest side.
-  die.angle = Math.round(die.angle / 90) * 90;
-  bigDie.style.transition = 'transform .22s ease-out';
+  // The cube rolls over onto the face it was always going to show: no swapping numbers.
+  faceUp(die.value);
+  cube.style.transition = 'transform .6s cubic-bezier(.2, .9, .25, 1.12)';
   drawDie();
   overlay.classList.add('landed');
   // The result stays under wraps until the die has landed.
@@ -455,6 +485,9 @@ function stepDie(dt, held) {
   die.x += die.vx * dt;
   die.y += die.vy * dt;
   die.angle += die.spin * dt;
+  // Rolling: the faster it moves, the faster it tumbles end over end.
+  die.rx -= die.vy * 0.42 * dt;
+  die.ry += die.vx * 0.42 * dt;
   die.travelled += Math.hypot(die.vx, die.vy) * dt;
 
   // Bounce off the edges of the screen, losing a little speed and picking up spin.
@@ -496,10 +529,6 @@ function tick(now) {
     overlay.classList.remove('bump');
     void overlay.offsetWidth;
     overlay.classList.add('bump');
-  }
-  if (bounced || die.travelled > (held ? 45 : 110)) {
-    die.travelled = 0;
-    rattle();
   }
 
   if (!held) {
@@ -543,6 +572,7 @@ function throwDie(value, seat) {
     landDie();
     return;
   }
+  cube.style.transition = 'none';
   document.body.classList.add('throwing');
   if (!fromHand) {
     // Someone else's roll (or a computer's) comes in from the bottom edge.
@@ -553,6 +583,8 @@ function throwDie(value, seat) {
     die.vx = Math.cos(heading) * speed;
     die.vy = Math.sin(heading) * speed;
     die.angle = Math.random() * 360;
+    die.rx = Math.random() * 360;
+    die.ry = Math.random() * 360;
     die.spin = (Math.random() < 0.5 ? -1 : 1) * (500 + Math.random() * 500);
   }
   die.mode = 'flying';
@@ -571,12 +603,14 @@ function requestRoll() {
 function setOut() {
   showDie(rollSeat);
   overlay.classList.add('held', 'ready');
-  // Any face will do until it is thrown.
-  bigDie.dataset.value = String(Math.floor(Math.random() * 6) + 1);
   Object.assign(die, {
     mode: 'ready', value: null, vx: 0, vy: 0, spin: 0, angle: 0, travelled: 0, pointer: null,
     x: window.innerWidth / 2, y: window.innerHeight / 2,
   });
+  // Any face will do until it is thrown, tilted a little so it reads as a cube.
+  faceUp(Math.floor(Math.random() * 6) + 1);
+  die.rx -= 18;
+  die.ry += 24;
   drawDie();
 }
 
@@ -634,6 +668,9 @@ function placeTokens() {
     const sharing = SEATS.filter((other) => state.players[other] !== null && square > 0 && shown[other] === square);
     const spread = sharing.length > 1 ? [[-1.9, -1.9], [1.9, 1.9], [1.9, -1.9], [-1.9, 1.9]][sharing.indexOf(seat)] : [0, 0];
     token.hidden = state.players[seat] === null;
+    const icon = pieceIcon(state, seat);
+    token.textContent = icon ?? String(seat + 1);
+    token.classList.toggle('piece', !!icon);
     token.classList.toggle('waiting', square === 0);
     token.classList.toggle('winner', state.winner === seat && square === LAST_SQUARE);
     token.style.left = `${point.x + spread[0]}%`;
@@ -684,13 +721,14 @@ function render() {
   const ready = !embedded || !!liveView?.connected;
   const enough = state.players.filter((id) => id !== null).length >= 2;
   const mine = mySeat(state);
-  const playing = ready && enough && state.winner === null;
+  const inLobby = state.phase === 'lobby';
+  const playing = ready && !inLobby && enough && state.winner === null;
   const clock = turnClock(state, playing);
   const canRoll = playing && mine === state.turn && !clock.expired;
   const selfId = liveView?.self?.id;
-  showBoardTheme(state.theme, ready);
-  $('theme-scope').textContent = embedded ? 'EVERYONE SEES IT' : '';
-  const visible = (seat) => state.players[seat] !== null || (embedded && seat < 2);
+  showBoardTheme(state.theme, ready && (!embedded || mine !== null));
+  renderLobby(state, ready, mine);
+  const visible = (seat) => state.players[seat] !== null;
 
   for (const seat of SEATS) {
     const name = nameFor(seat, state);
@@ -699,10 +737,13 @@ function render() {
     card.hidden = !visible(seat);
     card.classList.toggle('active', playing && state.turn === seat);
     card.classList.toggle('empty', state.players[seat] === null);
+    card.querySelector('.player-token').textContent = pieceIcon(state, seat) ?? String(seat + 1);
+    card.querySelector('.player-token').classList.toggle('piece', !!pieceIcon(state, seat));
     $(`name-${seat}`).textContent = name;
     let detail = position === 0 ? 'At the start' : `Square ${position}`;
     if (state.winner === seat) detail = 'Winner of this round';
-    if (embedded) detail = state.players[seat] === null ? 'Invite someone from your call' : `${state.players[seat] === selfId ? 'You · ' : ''}${detail}`;
+    if (inLobby) detail = 'Ready in the lobby';
+    if (embedded) detail = `${state.players[seat] === selfId ? 'You · ' : ''}${detail}`;
     $(`detail-${seat}`).textContent = detail;
     $(`badges-${seat}`).textContent = badgesFor(state, seat);
     $(`score-${seat}`).textContent = state.scores[seat];
@@ -713,9 +754,13 @@ function render() {
     status = liveView ? 'Syncing your game' : 'Waiting for Refract';
     detail = 'Your shared board will appear here.';
     statusSeat = null;
+  } else if (inLobby) {
+    status = 'Game lobby';
+    detail = !embedded ? 'Pick your options, then start.' : mine !== null ? 'You’re in. Start when everyone’s ready.' : 'Join the game, or stay and spectate.';
+    statusSeat = null;
   } else if (!enough) {
-    status = 'A seat for a friend';
-    detail = 'Ask someone in the call to join this activity.';
+    status = 'Waiting for players';
+    detail = 'Back to the lobby for more players.';
     statusSeat = null;
   } else if (state.winner !== null) {
     const won = embedded ? state.players[state.winner] === selfId : mode === 'computer' && state.winner === 0;
@@ -752,7 +797,6 @@ function render() {
   miniDie.dataset.seat = state.lastRoll ? String(state.lastRoll.seat) : 'none';
   miniDie.setAttribute('aria-label', value ? `Last roll: ${value}` : 'No roll yet');
   renderPowers(state, { mine, canPlay: canRoll && state.mode === 'chaos' && !state.powerUsed });
-  renderGameMode(state, ready, mine);
   announcePower(state, mine);
   $('roll').disabled = !canRoll;
   rollSeat = canRoll ? state.turn : null;
@@ -769,8 +813,12 @@ function render() {
 
   const lead = Math.max(...state.positions);
   const leaders = SEATS.filter((seat) => state.players[seat] !== null && state.positions[seat] === lead);
-  $('next-round').disabled = !ready || !enough || state.winner === null || (embedded && mine === null);
-  if (state.winner !== null) $('round-note').textContent = mine === null ? 'The players can start the next round.' : 'Another round? Keep the good times going.';
+  $('next-round').disabled = !ready || inLobby || !enough || state.winner === null || (embedded && mine === null);
+  $('to-lobby').disabled = !ready || inLobby || state.winner === null || (embedded && mine === null);
+  $('next-round').closest('.game-actions').hidden = inLobby;
+  // Round buttons only matter once someone has won.
+  $('next-round').closest('.round-buttons').hidden = state.winner === null;
+  if (state.winner !== null) $('round-note').textContent = mine === null ? 'The players can start the next round.' : 'Another round, or back to the lobby?';
   else if (lead === 0) $('round-note').textContent = 'A fresh board. Mind the snakes.';
   else if (leaders.length > 1) $('round-note').textContent = `Level on square ${lead}. ${LAST_SQUARE - lead} to go.`;
   else $('round-note').textContent = `${nameFor(leaders[0], state)} ${nameFor(leaders[0], state) === 'You' ? 'lead' : 'leads'} on square ${lead}. ${LAST_SQUARE - lead} to go.`;
@@ -781,7 +829,7 @@ function render() {
     $('player-count').textContent = `${people.length} IN ACTIVITY`;
     $('spectators').hidden = spectators.length === 0;
     $('spectators').textContent = `Watching · ${spectators.map((person) => person.name).join(', ')}`;
-    $('seat-description').textContent = !ready ? 'Connecting to your call…' : mine !== null ? `You’re the ${COLOURS[mine]} token. Roll well.` : 'You’re watching this round.';
+    $('seat-description').textContent = !ready ? 'Connecting to your call…' : mine !== null ? `You’re the ${COLOURS[mine]} player.` : inLobby ? 'You’re spectating. Join from the lobby.' : 'You’re spectating this game.';
     $('connection-label').textContent = ready ? 'Connected to Refract' : liveView ? 'Syncing with Refract' : 'Waiting for Refract';
     $('connection').dataset.state = ready ? 'connected' : 'waiting';
     if (liveView) {
@@ -802,8 +850,10 @@ let clockSettle = 0;
 let clockRolls = null;
 let beeped = null;
 
+const turnMs = (state) => (state.turnSeconds ?? TURN_SECONDS.standard) * 1000;
+
 function timedTurn(state, playing) {
-  if (!playing || state.players[state.turn] === null) return false;
+  if (!playing || state.phase !== 'playing' || state.players[state.turn] === null) return false;
   // Computer opponents take their own time.
   return embedded || mode === 'local' || state.turn === 0;
 }
@@ -818,8 +868,8 @@ function turnClock(state, playing) {
     beeped = null;
   }
   clockRolls = state.rolls;
-  if (!timed) return { timed: false, remaining: TURN_MS, expired: false };
-  const remaining = Math.max(0, TURN_MS - Math.max(0, performance.now() - clockStart - clockSettle));
+  if (!timed) return { timed: false, remaining: turnMs(state), expired: false };
+  const remaining = Math.max(0, turnMs(state) - Math.max(0, performance.now() - clockStart - clockSettle));
   return { timed: true, remaining, expired: remaining <= 0 };
 }
 
@@ -827,7 +877,7 @@ function updateClock() {
   const state = embedded ? liveView?.state ?? createGame([]) : localState;
   const ready = !embedded || !!liveView?.connected;
   const enough = state.players.filter((id) => id !== null).length >= 2;
-  const playing = ready && enough && state.winner === null;
+  const playing = ready && state.phase === 'playing' && enough && state.winner === null;
   const clock = turnClock(state, playing);
   const mine = mySeat(state);
   const myTurn = clock.timed && mine === state.turn;
@@ -837,7 +887,7 @@ function updateClock() {
   element.dataset.seat = String(state.turn);
   element.classList.toggle('urgent', clock.timed && seconds <= 5);
   $('countdown-seconds').textContent = String(seconds);
-  $('countdown-bar').style.width = `${(clock.remaining / TURN_MS) * 100}%`;
+  $('countdown-bar').style.width = `${(clock.remaining / turnMs(state)) * 100}%`;
   $('throw-hint').textContent = myTurn && seconds <= 5 ? `${seconds}… throw it!` : 'Your roll. Grab the die and fling it.';
   // Only the person whose turn is ending hears it.
   if (myTurn && beeped !== seconds && seconds <= 5) {
@@ -860,14 +910,14 @@ function updateClock() {
 const clockTimer = setInterval(updateClock, 200);
 
 function localRoll() {
-  localState = playRoll(localState, localState.players[localState.turn], rollDie());
+  localState = playRoll(localState, localState.players[localState.turn], rollDie(), Math.random);
   render();
   scheduleComputer();
 }
 
 function scheduleComputer() {
   clearTimeout(computerTimer);
-  if (embedded || mode !== 'computer' || localState.winner !== null || localState.turn === 0) return;
+  if (embedded || mode !== 'computer' || localState.phase !== 'playing' || localState.winner !== null || localState.turn === 0) return;
   // Long enough for the previous throw to land and its token to finish moving.
   computerTimer = setTimeout(computerTurn, reducedMotion?.matches ? 1400 : 4000);
 }
@@ -976,26 +1026,145 @@ function renderPowers(state, { mine, canPlay }) {
   }
 }
 
-function renderGameMode(state, ready, mine) {
-  const changeable = canChangeMode(state) && ready && (!embedded || mine !== null);
+// ---------- Lobby ----------
+const pieceButtons = Object.entries(PIECES).map(([id, piece]) => {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'piece-option';
+  button.dataset.piece = id;
+  button.title = piece.name;
+  button.setAttribute('aria-label', piece.name);
+  button.textContent = piece.icon ?? '#';
+  button.addEventListener('click', () => pickPiece(id));
+  return button;
+});
+$('piece-options').replaceChildren(...pieceButtons);
+let pieceOffered = false;
+
+function pickPiece(piece) {
+  savePiece(piece);
+  if (embedded) session.choosePiece(piece);
+  else {
+    localState = choosePiece(localState, localState.players[0], piece);
+    render();
+  }
+}
+
+function setOption(options) {
+  if (embedded) session.setOptions(options);
+  else {
+    if (options.mode) gameMode = options.mode;
+    if (options.turnSeconds) localSeconds = options.turnSeconds;
+    localState = configure(localState, localState.players[0], options);
+    render();
+  }
+}
+
+function renderLobby(state, ready, mine) {
+  const lobby = $('lobby');
+  lobby.hidden = state.phase !== 'lobby' || !ready;
+  if (lobby.hidden) { pieceOffered = false; return; }
+  const seatedCount = state.players.filter((id) => id !== null).length;
+  // Locally you are always seated; in Refract you join or spectate.
+  const seatedHere = !embedded || mine !== null;
+  const full = seatedCount >= 4;
+  $('lobby-count').textContent = `${seatedCount} / 4 PLAYERS`;
+  $('lobby-seats').replaceChildren(...SEATS.map((seat) => {
+    const row = document.createElement('div');
+    row.className = 'lobby-seat';
+    row.dataset.seat = String(seat);
+    row.classList.toggle('open', state.players[seat] === null);
+    const token = document.createElement('span');
+    token.className = 'lobby-token';
+    token.textContent = state.players[seat] === null ? '' : pieceIcon(state, seat) ?? String(seat + 1);
+    const name = document.createElement('span');
+    name.className = 'lobby-name';
+    name.textContent = state.players[seat] === null ? 'Open seat' : `${nameFor(seat, state)}${embedded && seat === mine ? ' (you)' : ''}`;
+    row.append(token, name);
+    return row;
+  }));
+  if (embedded) {
+    $('lobby-you-note').textContent = mine !== null ? 'You’re in the game.' : full ? 'The game is full, so you’re spectating.' : 'You’re spectating. Join to play.';
+    $('join-game').hidden = mine !== null;
+    $('join-game').disabled = full;
+    $('spectate').hidden = mine === null;
+    // Offer the piece this viewer picked last time.
+    if (mine !== null && !pieceOffered && state.pieces[mine] === 'counter' && savedPiece !== 'counter') {
+      pieceOffered = true;
+      session.choosePiece(savedPiece);
+    }
+    if (mine === null) pieceOffered = false;
+  }
+  $('piece-picker').hidden = !seatedHere;
+  const myPiece = embedded ? state.pieces[mine] : state.pieces[0];
+  for (const button of pieceButtons) button.setAttribute('aria-pressed', String(button.dataset.piece === myPiece));
   for (const button of document.querySelectorAll('[data-game-mode]')) {
     button.setAttribute('aria-pressed', String(button.dataset.gameMode === state.mode));
-    // Locally a switch just starts a new game; in Refract it waits for a fresh round.
-    button.disabled = embedded ? !changeable && button.dataset.gameMode !== state.mode : false;
+    button.disabled = !seatedHere;
   }
-  $('game-mode-scope').textContent = embedded ? 'EVERYONE PLAYS IT' : '';
   $('game-mode-hint').textContent = state.mode === 'chaos'
-    ? 'Everyone gets three random power-ups each round. Play one per turn before you throw.'
-    : embedded && !changeable ? 'Plain snakes and ladders. Switch modes before anyone moves, or after a round.' : 'Plain snakes and ladders.';
+    ? 'Everyone starts with two power-ups: one to use on a rival and one for themselves. Roll a 3 to win another.'
+    : 'Plain snakes and ladders.';
+  const slider = $('turn-seconds');
+  if (document.activeElement !== slider) slider.value = String(state.turnSeconds);
+  slider.disabled = !seatedHere;
+  $('turn-seconds-value').textContent = `${slider.value} seconds`;
+  $('practice-options').hidden = embedded;
+  const canStart = seatedHere && seatedCount >= 2;
+  $('start-game').disabled = !canStart;
+  $('lobby-note').textContent = seatedCount < 2 ? 'Two players needed to start.' : seatedHere ? 'Anyone in the game can start it.' : 'Waiting for a player to start.';
 }
+
+$('join-game').addEventListener('click', () => session.join());
+$('spectate').addEventListener('click', () => session.spectate());
+$('start-game').addEventListener('click', () => {
+  if (embedded) session.start();
+  else {
+    localState = startGame(localState, localState.players[0], Math.random);
+    render();
+    scheduleComputer();
+  }
+});
+$('to-lobby').addEventListener('click', () => {
+  if (embedded) session.backToLobby();
+  else {
+    clearTimeout(computerTimer);
+    localState = toLobby(localState);
+    render();
+  }
+});
+$('turn-seconds').addEventListener('input', (event) => { $('turn-seconds-value').textContent = `${event.target.value} seconds`; });
+$('turn-seconds').addEventListener('change', (event) => setOption({ turnSeconds: Number(event.target.value) }));
 
 let bannerKey;
 let bannerTimer = null;
+let bonusTimer = null;
+function showBanner(seat, icon, text) {
+  const banner = $('banner');
+  banner.dataset.seat = String(seat);
+  $('banner-icon').textContent = icon;
+  $('banner-text').textContent = text;
+  banner.hidden = false;
+  banner.classList.remove('pop');
+  void banner.offsetWidth;
+  banner.classList.add('pop');
+  clearTimeout(bannerTimer);
+  bannerTimer = setTimeout(() => { banner.hidden = true; }, 2600);
+}
 function announcePower(state, mine) {
-  const key = `${state.round}:${state.powers}`;
-  const fresh = bannerKey !== undefined && key !== bannerKey && state.lastEvent === 'power' && state.lastPower;
+  const key = `${state.round}:${state.powers}:${state.rolls}`;
+  const fresh = bannerKey !== undefined && key !== bannerKey;
   bannerKey = key;
   if (!fresh) return;
+  if (state.lastEvent === 'roll' && state.lastBonus) {
+    const seat = state.lastRoll.seat;
+    const who = seat === mine && (embedded || mode === 'computer') ? 'You' : nameFor(seat, state);
+    const won = POWER_UPS[state.lastBonus];
+    clearTimeout(bonusTimer);
+    bonusTimer = setTimeout(() => showBanner(seat, '🎁', `${who} rolled a 3 and won ${won.icon} ${won.name}!`), THROW_MS + 400);
+    return;
+  }
+  if (state.lastEvent !== 'power' || !state.lastPower) return;
   const banner = $('banner');
   banner.dataset.seat = String(state.lastPower.seat);
   $('banner-icon').textContent = POWER_UPS[state.lastPower.power].icon;
@@ -1011,28 +1180,19 @@ function announcePower(state, mine) {
 $('target-cancel').addEventListener('click', () => { aiming = null; render(); });
 
 for (const button of document.querySelectorAll('[data-game-mode]')) {
-  button.addEventListener('click', () => {
-    const chosen = button.dataset.gameMode;
-    if (embedded) {
-      session.setMode(chosen);
-      return;
-    }
-    if (chosen === gameMode) return;
-    gameMode = chosen;
-    resetLocal();
-  });
+  button.addEventListener('click', () => setOption({ mode: button.dataset.gameMode }));
 }
 
 function resetLocal() {
   clearTimeout(computerTimer);
-  localState = createGame(localPlayers(), localState.theme, gameMode);
+  localState = localLobby();
   $('mode-computer').setAttribute('aria-pressed', String(mode === 'computer'));
   $('mode-local').setAttribute('aria-pressed', String(mode === 'local'));
   for (const button of document.querySelectorAll('[data-count]')) {
     button.setAttribute('aria-pressed', String(Number(button.dataset.count) === playerCount));
   }
   if (mode === 'local') $('mode-hint').textContent = 'One screen, one die. Pass it around.';
-  else $('mode-hint').textContent = playerCount === 2 ? 'You against the dice, and a computer that rolls its own.' : `You against the dice, and ${playerCount - 1} computers that roll their own.`;
+  else $('mode-hint').textContent = playerCount === 2 ? 'You against a computer that rolls its own.' : `You against ${playerCount - 1} computers that roll their own.`;
   render();
 }
 
@@ -1100,7 +1260,7 @@ window.addEventListener('keydown', (event) => {
 
 $('next-round').addEventListener('click', () => {
   if (embedded) session.rematch();
-  else { localState = nextRound(localState); render(); scheduleComputer(); }
+  else { localState = nextRound(localState, Math.random); render(); scheduleComputer(); }
 });
 
 for (const choice of ['computer', 'local']) {
