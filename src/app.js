@@ -44,6 +44,8 @@ let stepTimer = null;
 const THROW_MS = 1900;
 const THROW_HOLD_MS = 1000;
 let throwTimer = null;
+// Lands the die by the clock if animation frames stall, as in a background or hidden frame.
+let flightTimer = null;
 let frame = null;
 let tossed = false;
 let rollSeat = null;
@@ -271,6 +273,8 @@ function describeRoll(state, mine) {
 }
 
 const still = () => !!reducedMotion?.matches || document.hidden;
+// Rolling by button instead of by throwing the die.
+const manualRoll = () => !!reducedMotion?.matches;
 const launchSpeed = () => Math.max(window.innerWidth, window.innerHeight) * 2.6;
 
 function drawDie() {
@@ -286,6 +290,7 @@ function rattle() {
 
 function showDie(seat) {
   clearTimeout(throwTimer);
+  clearTimeout(flightTimer);
   overlay.dataset.seat = seat === null ? 'none' : String(seat);
   overlay.classList.remove('landed');
   overlay.classList.add('show');
@@ -293,6 +298,7 @@ function showDie(seat) {
 }
 
 function putAway() {
+  clearTimeout(flightTimer);
   die.mode = 'away';
   cancelAnimationFrame(frame);
   frame = null;
@@ -302,6 +308,7 @@ function putAway() {
 }
 
 function landDie() {
+  clearTimeout(flightTimer);
   die.mode = 'rest';
   cancelAnimationFrame(frame);
   frame = null;
@@ -313,7 +320,11 @@ function landDie() {
   overlay.classList.add('landed');
   // The result stays under wraps until the die has landed.
   document.body.classList.remove('throwing');
-  throwTimer = setTimeout(putAway, THROW_HOLD_MS);
+  throwTimer = setTimeout(() => {
+    putAway();
+    // A six, or the next player at this screen, gets the die straight back.
+    render();
+  }, THROW_HOLD_MS);
 }
 
 /** Advance the die by `dt` seconds. Returns true when it hit an edge of the screen. */
@@ -386,9 +397,10 @@ function tick(now) {
       landDie();
       return;
     }
-    // No roll came back (a rejected request, say): put the die away.
+    // No roll came back (a rejected request, say): put the die away and offer it again.
     if (die.value === null && elapsed > 2500) {
       putAway();
+      render();
       return;
     }
   }
@@ -436,6 +448,7 @@ function throwDie(value, seat) {
   die.started = performance.now();
   drawDie();
   startLoop();
+  flightTimer = setTimeout(() => { if (die.mode === 'flying') landDie(); }, THROW_MS + 400);
 }
 
 function requestRoll() {
@@ -466,7 +479,7 @@ function grab(event) {
   die.py = die.y;
   overlay.classList.remove('ready');
   overlay.classList.add('grabbing');
-  try { overlay.setPointerCapture(event.pointerId); } catch { /* The drag still works without capture. */ }
+  try { bigDie.setPointerCapture(event.pointerId); } catch { /* The drag still works without capture. */ }
   startLoop();
 }
 
@@ -490,6 +503,12 @@ function release() {
   die.started = performance.now();
   tossed = true;
   startLoop();
+  clearTimeout(flightTimer);
+  flightTimer = setTimeout(() => {
+    if (die.mode !== 'flying' || die.value !== null) return;
+    putAway();
+    render();
+  }, 2900);
   // The throw is for show: the roll itself stays a fair, independent throw.
   requestRoll();
 }
@@ -592,7 +611,7 @@ function render() {
   } else {
     status = canRoll && (embedded || mode === 'computer') ? 'Your roll' : `${nameFor(state.turn, state)}’s roll`;
     if (state.lastRoll) detail = describeRoll(state, mine);
-    else detail = canRoll ? 'Click roll, then grab the die and fling it.' : mine !== null ? 'Good things come to those who wait.' : 'You’ve got the best seat to watch.';
+    else detail = canRoll ? (manualRoll() ? 'Roll when you’re ready.' : 'Grab the die and fling it.') : mine !== null ? 'Good things come to those who wait.' : 'You’ve got the best seat to watch.';
     statusSeat = state.turn;
   }
   if (status !== lastStatus) { $('status').textContent = status; lastStatus = status; }
@@ -600,23 +619,26 @@ function render() {
   $('status-token').dataset.seat = statusSeat === null ? 'none' : String(statusSeat);
   $('round').textContent = `ROUND ${String(state.round).padStart(2, '0')}`;
 
-  const die = $('die');
+  const miniDie = $('die');
   const value = state.lastRoll?.die ?? 0;
   // Only a new roll throws the die; theme and seat updates leave it alone.
   const rollKey = `${state.round}:${state.rolls}`;
-  if (state.lastRoll && die.dataset.rollKey !== rollKey && die.dataset.rollKey !== undefined) {
-    die.classList.remove('rolled');
-    void die.offsetWidth;
-    die.classList.add('rolled');
+  if (state.lastRoll && miniDie.dataset.rollKey !== rollKey && miniDie.dataset.rollKey !== undefined) {
+    miniDie.classList.remove('rolled');
+    void miniDie.offsetWidth;
+    miniDie.classList.add('rolled');
     throwDie(value, state.lastRoll.seat);
   }
-  die.dataset.rollKey = rollKey;
-  die.dataset.value = String(value);
-  die.dataset.seat = state.lastRoll ? String(state.lastRoll.seat) : 'none';
-  die.setAttribute('aria-label', value ? `Last roll: ${value}` : 'No roll yet');
+  miniDie.dataset.rollKey = rollKey;
+  miniDie.dataset.value = String(value);
+  miniDie.dataset.seat = state.lastRoll ? String(state.lastRoll.seat) : 'none';
+  miniDie.setAttribute('aria-label', value ? `Last roll: ${value}` : 'No roll yet');
   $('roll').disabled = !canRoll;
   rollSeat = canRoll ? state.turn : null;
+  // On this player's turn the die simply appears, ready to throw. With reduced motion the
+  // roll button is shown instead.
   if (inHand() && !canRoll) putAway();
+  else if (canRoll && die.mode === 'away' && !manualRoll()) setOut();
 
   syncTokens(state, embedded ? 'live' : `${mode}-${playerCount}`);
   const places = SEATS.filter((seat) => state.players[seat] !== null)
@@ -688,45 +710,47 @@ $('calm-toggle').addEventListener('click', () => {
   showCalm();
 });
 
+// The roll button only exists for reduced motion, where the die does not fly.
 const rollButton = $('roll');
+function syncManualRoll() {
+  document.documentElement.classList.toggle('manual-roll', manualRoll());
+}
+syncManualRoll();
+reducedMotion?.addEventListener?.('change', () => {
+  syncManualRoll();
+  if (manualRoll() && inHand()) putAway();
+  render();
+});
 rollButton.addEventListener('click', () => {
-  if (inHand()) {
-    // Keyboard: the same key that set the die out tosses it.
-    release();
-    return;
-  }
-  if (rollButton.disabled) return;
-  if (still()) {
-    requestRoll();
-    return;
-  }
-  setOut();
+  if (inHand()) release();
+  else if (!rollButton.disabled) requestRoll();
 });
 
-// While the die is out, the overlay takes every press: on the die picks it up,
-// anywhere else tosses it.
-overlay.addEventListener('pointerdown', (event) => {
+// Only the die itself takes the pointer, so the rest of the page stays usable while it waits.
+bigDie.addEventListener('pointerdown', (event) => {
   if (die.mode !== 'ready' || event.button !== 0) return;
   event.preventDefault();
-  const reach = bigDie.offsetWidth * 0.62;
-  if (Math.hypot(event.clientX - die.x, event.clientY - die.y) <= reach) grab(event);
-  else release();
+  grab(event);
 });
 
-overlay.addEventListener('pointermove', (event) => {
+bigDie.addEventListener('pointermove', (event) => {
   if (die.mode !== 'held' || event.pointerId !== die.pointer) return;
   die.px = event.clientX - die.grabX;
   die.py = event.clientY - die.grabY;
 });
 
 for (const type of ['pointerup', 'pointercancel']) {
-  overlay.addEventListener(type, (event) => {
+  bigDie.addEventListener(type, (event) => {
     if (die.mode === 'held' && event.pointerId === die.pointer) release();
   });
 }
 
+// Keyboard: Space or Enter tosses the waiting die, unless a control has focus.
 window.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && inHand()) putAway();
+  if (die.mode !== 'ready' || (event.key !== ' ' && event.key !== 'Enter') || event.repeat) return;
+  if (event.target instanceof Element && event.target.closest('button, input, select, textarea, a')) return;
+  event.preventDefault();
+  release();
 });
 
 $('next-round').addEventListener('click', () => {
